@@ -30,7 +30,7 @@ Use the live tool here:
 
 ## Screenshot
 
-![AI Workflow Governance Designer screenshot](docs/screenshot-home.png)
+![AI Workflow Governance Designer screenshot](docs/screenshot.png)
 
 ## 🏗️ Technical Stack
 - Vanilla HTML/CSS/JS (TypeScript)
