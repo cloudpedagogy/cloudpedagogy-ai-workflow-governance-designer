@@ -22,6 +22,16 @@ The **AI Workflow Governance Designer** enables users to design structured workf
 - **Local-First & Privacy-Preserving**: All data stays in your browser's LocalStorage.
 - **Governance-Ready Exports**: Generate professional documentation for audits.
 
+## Live Application
+
+Use the live tool here:
+
+**http://cloudpedagogy-ai-workflow-governance-designer.s3-website.eu-west-2.amazonaws.com/**
+
+## Screenshot
+
+![AI Workflow Governance Designer screenshot](docs/screenshot-home.png)
+
 ## 🏗️ Technical Stack
 - Vanilla HTML/CSS/JS (TypeScript)
 - Vite for build and development
