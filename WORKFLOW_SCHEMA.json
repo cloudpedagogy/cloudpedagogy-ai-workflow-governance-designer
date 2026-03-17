@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AI Workflow Governance Specification",
+  "type": "object",
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "workflow_id": { "type": "string" },
+        "workflow_title": { "type": "string" },
+        "version": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "workflow_owner": { "type": "string" },
+        "organisation": { "type": "string" },
+        "purpose": { "type": "string" },
+        "domain": { "type": "string" }
+      },
+      "required": ["workflow_title", "workflow_owner", "purpose"]
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "step_id": { "type": "string" },
+          "step_name": { "type": "string" },
+          "step_type": { "enum": ["human-only", "ai-supported", "ai-generated", "decision-point"] },
+          "description": { "type": "string" },
+          "inputs": { "type": "array", "items": { "type": "string" } },
+          "outputs": { "type": "array", "items": { "type": "string" } },
+          "ai_involvement": {
+            "type": "object",
+            "properties": {
+              "ai_role": { "type": "string" },
+              "reliance_level": { "enum": ["low", "medium", "high", "critical"] }
+            }
+          },
+          "human_oversight": {
+            "type": "object",
+            "properties": {
+              "responsible_role": { "type": "string" },
+              "oversight_level": { "enum": ["none", "minimal", "active", "full"] },
+              "intervention_points": { "type": "string" }
+            }
+          },
+          "risks": {
+            "type": "object",
+            "properties": {
+              "bias_risk": { "type": "string" },
+              "operational_risk": { "type": "string" },
+              "ethical_risk": { "type": "string" },
+              "privacy_risk": { "type": "string" },
+              "mitigation": { "type": "string" }
+            }
+          },
+          "controls": {
+            "type": "object",
+            "properties": {
+              "approval_required": { "type": "boolean" },
+              "escalation_path": { "type": "string" },
+              "review_cycle": { "type": "string" }
+            }
+          }
+        },
+        "required": ["step_name", "step_type"]
+      }
+    },
+    "reflection": {
+      "type": "object",
+      "properties": {
+        "failure_modes": { "type": "string" },
+        "essential_judgement": { "type": "string" },
+        "over_reliance_risks": { "type": "string" },
+        "embedded_assumptions": { "type": "string" }
+      }
+    },
+    "governance_metrics": {
+      "type": "object",
+      "properties": {
+        "completeness_score": { "type": "number" },
+        "ai_dependency_score": { "type": "number" }
+      }
+    }
+  }
+}

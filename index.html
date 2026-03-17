@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Workflow Governance Designer</title>
+    <meta name="description" content="A governance-first design environment for creating, analysing, and documenting AI-supported workflows." />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+  </head>
+  <body>
+    <div id="app">
+      <nav class="sidebar">
+        <div class="logo">
+          AI Workflow <span class="logo-accent">Designer</span>
+        </div>
+        <div class="nav-links">
+          <button class="nav-item active" data-view="dashboard">
+            <span class="icon">📊</span> Dashboard
+          </button>
+          <button class="nav-item" data-view="workflow-context">
+            <span class="icon">📝</span> Context
+          </button>
+          <button class="nav-item" data-view="workflow-builder">
+            <span class="icon">🏗️</span> Step Builder
+          </button>
+          <button class="nav-item" data-view="governance-panel">
+            <span class="icon">🛡️</span> Governance
+          </button>
+          <button class="nav-item" data-view="reflection-layer">
+            <span class="icon">💭</span> Reflection
+          </button>
+          <button class="nav-item" data-view="export-panel">
+            <span class="icon">📥</span> Export
+          </button>
+        </div>
+        <div class="sidebar-footer">
+          <div class="completeness-mini">
+            <div class="label">Governance Completeness</div>
+            <div class="progress-bar">
+              <div class="progress" style="width: 0%"></div>
+            </div>
+            <div class="value">0%</div>
+          </div>
+        </div>
+      </nav>
+
+      <main class="content">
+        <header class="top-bar">
+          <h1 id="view-title">Dashboard</h1>
+          <div class="top-actions">
+            <button id="load-demo" class="btn btn-secondary" style="border-color: var(--warning-color); color: var(--warning-color)">Demo Example</button>
+            <button id="new-workflow" class="btn btn-secondary">New Workflow</button>
+            <button id="save-workflow" class="btn btn-primary">Save Local</button>
+            <button id="import-workflow" class="btn btn-secondary">Import JSON</button>
+          </div>
+        </header>
+
+        <div id="view-container" class="view-container">
+          <!-- Views will be injected here -->
+        </div>
+      </main>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
