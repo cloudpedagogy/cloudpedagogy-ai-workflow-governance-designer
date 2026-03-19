@@ -32,20 +32,45 @@ Use the live tool here:
 
 ![AI Workflow Governance Designer screenshot](docs/screenshot.png)
 
-## 🏗️ Technical Stack
-- Vanilla HTML/CSS/JS (TypeScript)
-- Vite for build and development
-- Local-first (LocalStorage) persistence
-
+---
 ## 🛠️ Getting Started
-### Development
+
+### Clone the repository
+
+```bash
+git clone [repository-url]
+cd [repository-folder]
+```
+
+### Install dependencies
+
 ```bash
 npm install
+```
+
+### Run locally
+
+```bash
 npm run dev
 ```
 
-### Build
+Once running, your terminal will display a local URL (often http://localhost:5173). Open this in your browser to use the application.
+
+### Build for production
+
 ```bash
 npm run build
 ```
-The build output will be in the `dist` directory, ready to be hosted on S3 or GitHub Pages.
+
+The production build will be generated in the `dist/` directory and can be deployed to any static hosting service.
+
+---
+
+## 🔐 Privacy & Security
+
+- **Fully local**: All data remains in the user's browser  
+- **No backend**: No external API calls or database storage  
+- **Privacy-preserving**: No tracking or data exfiltration  
+- Suitable for use in sensitive organisational and governance contexts  
+
+---
