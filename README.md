@@ -23,7 +23,7 @@ The **AI Workflow Governance Designer** enables users to design structured workf
 - **Governance-Ready Exports**: Generate professional documentation for audits.
 
 ---
-## Live Application
+## 🌐 Live Hosted Version
 
 Use the live tool here:
 
