@@ -74,3 +74,28 @@ The production build will be generated in the `dist/` directory and can be deplo
 - Suitable for use in sensitive organisational and governance contexts  
 
 ---
+
+## Disclaimer
+
+This repository contains exploratory, framework-aligned tools developed for reflection, learning, and discussion.
+
+These tools are provided **as-is** and are not production systems, audits, or compliance instruments. Outputs are indicative only and should be interpreted in context using professional judgement.
+
+All applications are designed to run locally in the browser. No user data is collected, stored, or transmitted.
+
+---
+
+## Licensing & Scope
+
+This repository contains open-source software released under the MIT License.
+
+CloudPedagogy frameworks and related materials are licensed separately and are not embedded or enforced within this software.
+
+---
+
+## About CloudPedagogy
+
+CloudPedagogy develops open, governance-credible resources for building confident, responsible AI capability across education, research, and public service.
+
+- Website: https://www.cloudpedagogy.com/
+- Framework: https://github.com/cloudpedagogy/cloudpedagogy-ai-capability-framework
