@@ -4,36 +4,33 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AI Workflow Governance Designer</title>
-    <meta name="description" content="A governance-first design environment for creating, analysing, and documenting AI-supported workflows." />
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <title>CloudPedagogy | AI Workflow Governance Designer</title>
+    <meta name="description" content="A governance-ready design environment for creating, analysing, and documenting AI-supported workflows." />
   </head>
   <body>
     <div id="app">
       <nav class="sidebar">
         <div class="logo">
-          AI Workflow <span class="logo-accent">Designer</span>
+          <a href="https://www.cloudpedagogy.com/">CloudPedagogy</a>
         </div>
         <div class="nav-links">
           <button class="nav-item active" data-view="dashboard">
-            <span class="icon">📊</span> Dashboard
+            Dashboard
           </button>
           <button class="nav-item" data-view="workflow-context">
-            <span class="icon">📝</span> Context
+            Context
           </button>
           <button class="nav-item" data-view="workflow-builder">
-            <span class="icon">🏗️</span> Step Builder
+            Step Builder
           </button>
           <button class="nav-item" data-view="governance-panel">
-            <span class="icon">🛡️</span> Governance
+            Governance
           </button>
           <button class="nav-item" data-view="reflection-layer">
-            <span class="icon">💭</span> Reflection
+            Reflection
           </button>
           <button class="nav-item" data-view="export-panel">
-            <span class="icon">📥</span> Export
+            Export
           </button>
         </div>
         <div class="sidebar-footer">
@@ -49,9 +46,13 @@
 
       <main class="content">
         <header class="top-bar">
+          <div class="header-branding">
+            <div id="app-name" class="app-name">AI Workflow Governance Designer</div>
+          </div>
+          <div class="header-divider">/</div>
           <h1 id="view-title">Dashboard</h1>
           <div class="top-actions">
-            <button id="load-demo" class="btn btn-secondary" style="border-color: var(--warning-color); color: var(--warning-color)">Demo Example</button>
+            <button id="load-demo" class="btn btn-secondary">Demo Example</button>
             <button id="new-workflow" class="btn btn-secondary">New Workflow</button>
             <button id="save-workflow" class="btn btn-primary">Save Local</button>
             <button id="import-workflow" class="btn btn-secondary">Import JSON</button>
@@ -61,6 +62,10 @@
         <div id="view-container" class="view-container">
           <!-- Views will be injected here -->
         </div>
+
+        <footer class="page-footer">
+          <p class="footer-text">CloudPedagogy · Governance-ready AI and curriculum systems</p>
+        </footer>
       </main>
     </div>
     <script type="module" src="/src/main.ts"></script>

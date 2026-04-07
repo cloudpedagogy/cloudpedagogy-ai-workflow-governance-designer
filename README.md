@@ -35,6 +35,11 @@ Use the live tool here:
 ![AI Workflow Governance Designer screenshot](docs/screenshot.png)
 
 ---
+## 🏗️ Technical Stack
+- Vanilla HTML/CSS/JS (TypeScript)
+- Vite for build and development
+- Local-first (LocalStorage) persistence
+
 ## 🛠️ Getting Started
 
 ### Clone the repository

@@ -77,8 +77,7 @@ class App {
     if (!banner) {
       banner = document.createElement('div');
       banner.id = 'demo-banner';
-      banner.style.cssText = 'background: var(--warning-color); color: var(--bg-color); padding: 8px 40px; text-align: center; font-weight: 600; font-size: 0.9rem;';
-      banner.innerHTML = 'Viewing Demo Example. <span style="font-weight: 400">Changes are temporary. To save this as your own, click "Save Local". To discard, refresh the page or click "New Workflow".</span>';
+      banner.innerHTML = 'Viewing Demo Example. <span>Changes are temporary. To save this as your own, click "Save Local". To discard, refresh the page or click "New Workflow".</span>';
       document.querySelector('.content')?.prepend(banner);
     }
   }
@@ -156,10 +155,9 @@ class App {
     
     return `
       <div class="dash-grid">
-        <div class="metric-card highlight">
+        <div class="metric-card">
           <div class="metric-header">
             <span class="metric-title">Governance Completeness</span>
-            <span class="icon">📈</span>
           </div>
           <div class="metric-value">${completeness}%</div>
           <div class="progress-bar">
@@ -170,7 +168,6 @@ class App {
         <div class="metric-card">
           <div class="metric-header">
             <span class="metric-title">AI Dependency Map</span>
-            <span class="icon">🤖</span>
           </div>
           <div class="metric-value">${dependency}%</div>
           <p class="metric-title">${dependency > 50 ? 'High concentration of AI reliance detected.' : 'Balanced human-AI collaboration.'}</p>
@@ -179,16 +176,14 @@ class App {
         <div class="metric-card">
           <div class="metric-header">
             <span class="metric-title">Workflow Steps</span>
-            <span class="icon">🔢</span>
           </div>
           <div class="metric-value">${this.store.steps.length}</div>
           <p class="metric-title">${this.store.metadata.title || 'Untitled Workflow'}</p>
         </div>
 
-        <div class="metric-card ${getHumanOversightIndicator(this.store).count > 0 ? 'warning' : ''}" style="${getHumanOversightIndicator(this.store).count > 0 ? 'border-color: var(--warning-color)' : ''}">
+        <div class="metric-card">
           <div class="metric-header">
             <span class="metric-title">Oversight Gaps</span>
-            <span class="icon">⚠️</span>
           </div>
           <div class="metric-value">${getHumanOversightIndicator(this.store).count}</div>
           <p class="metric-title">${getHumanOversightIndicator(this.store).count > 0 ? 'Steps requiring additional oversight.' : 'All high-risk steps governed.'}</p>
@@ -197,11 +192,11 @@ class App {
 
       <div class="section" style="margin-top: 32px">
         <h2>Capability Intent</h2>
-        <p style="color: var(--text-secondary)">This workflow aims to operationalise governed AI involvement through explicit traceability and accountability.</p>
-        <div class="cdd-pills" style="display: flex; gap: 12px; margin-top: 20px">
-          <span class="step-type-pill type-human">Traceability</span>
-          <span class="step-type-pill type-ai-support">Accountability</span>
-          <span class="step-type-pill type-decision">Risk Awareness</span>
+        <p>This workflow aims to operationalise governed AI involvement through explicit traceability and accountability.</p>
+        <div class="cdd-pills" style="display: flex; gap: 8px; margin-top: 16px">
+          <span class="step-type-pill">Traceability</span>
+          <span class="step-type-pill">Accountability</span>
+          <span class="step-type-pill">Risk Awareness</span>
         </div>
       </div>
     `;
@@ -212,7 +207,7 @@ class App {
     return `
       <div class="section section-hero">
         <h2>Workflow Context Definition</h2>
-        <p style="color: var(--text-secondary); margin-bottom: 24px">Define the foundational purpose and organizational context for this automated workflow.</p>
+        <p>Define the foundational purpose and organizational context for this automated workflow.</p>
         
         <form id="context-form">
           <div class="form-group">
@@ -299,13 +294,13 @@ class App {
       <div class="step-item" data-id="${step.id}">
         <div class="step-header">
           <div style="display: flex; align-items: center; gap: 16px">
-            <span class="step-number" style="font-weight: 700; color: var(--accent-color)">0${index + 1}</span>
+            <span class="step-number" style="font-weight: 700; color: var(--text-muted)">${index + 1}</span>
             <span style="font-weight: 600">${step.name || 'Untitled Step'}</span>
-            <span class="step-type-pill type-${step.type}">${types[step.type]}</span>
+            <span class="step-type-pill">${types[step.type]}</span>
           </div>
           <div style="display: flex; gap: 8px">
-            <button class="btn btn-secondary btn-sm edit-step">Edit / Expand</button>
-            <button class="btn btn-secondary btn-sm delete-step" style="color: var(--danger-color)">Delete</button>
+            <button class="btn btn-secondary btn-sm edit-step">Edit</button>
+            <button class="btn btn-secondary btn-sm delete-step">Delete</button>
           </div>
         </div>
         <div class="step-content">
@@ -341,8 +336,8 @@ class App {
             </div>
           </div>
 
-          <div class="human-ai-boundary" style="border-top: 1px solid var(--card-border); margin-top: 16px; padding-top: 16px">
-            <h4 style="margin-bottom: 12px; font-size: 0.9rem; text-transform: uppercase; color: var(--accent-color)">Human-AI Boundary & Oversight</h4>
+          <div class="human-ai-boundary" style="border-top: 1px solid var(--border-color); margin-top: 16px; padding-top: 16px">
+            <h4>Human-AI Boundary & Oversight</h4>
             <div class="grid-2">
               <div class="form-group">
                 <label>Responsible Role</label>
@@ -364,8 +359,8 @@ class App {
             </div>
           </div>
 
-          <div class="risk-layer" style="border-top: 1px solid var(--card-border); margin-top: 16px; padding-top: 16px">
-            <h4 style="margin-bottom: 12px; font-size: 0.9rem; text-transform: uppercase; color: var(--warning-color)">Risk Identification Layer</h4>
+          <div class="risk-layer" style="border-top: 1px solid var(--border-color); margin-top: 16px; padding-top: 16px">
+            <h4>Risk Identification Layer</h4>
             <div class="grid-2">
               <div class="form-group">
                 <label>Bias / Fairness Risk</label>
@@ -383,8 +378,8 @@ class App {
           </div>
 
           ${step.type === 'decision-point' ? `
-            <div class="governance-controls" style="border-top: 1px solid var(--card-border); margin-top: 16px; padding-top: 16px">
-              <h4 style="margin-bottom: 12px; font-size: 0.9rem; text-transform: uppercase; color: var(--danger-color)">Decision Point Controls</h4>
+            <div class="governance-controls" style="border-top: 1px solid var(--border-color); margin-top: 16px; padding-top: 16px">
+              <h4>Decision Point Controls</h4>
               <div class="form-group">
                 <label style="display: flex; align-items: center; gap: 8px; cursor: pointer">
                   <input type="checkbox" class="step-checkbox-nested" data-parent="controls" data-field="approval_required" ${step.controls.approval_required ? 'checked' : ''} style="width: auto">
@@ -495,9 +490,9 @@ class App {
             <div class="step-item">
               <div class="step-header">
                 <span style="font-weight: 600">${step.name || 'Untitled Step'}</span>
-                <span class="step-type-pill type-${step.type}">${step.type}</span>
+                <span class="step-type-pill">${step.type}</span>
               </div>
-              <div class="step-content expanded" style="border-top: 1px solid var(--card-border)">
+              <div class="step-content expanded" style="border-top: 1px solid var(--border-color)">
                 <div class="grid-2">
                   <div class="form-group">
                     <label>Approval Required</label>
@@ -547,7 +542,7 @@ class App {
     return `
       <div class="section section-hero">
         <h2>Critical Reflection Layer</h2>
-        <p style="color: var(--text-secondary); margin-bottom: 24px">Analyse the systemic risks and human accountability requirements of this workflow design.</p>
+        <p>Analyse the systemic risks and human accountability requirements of this workflow design.</p>
         
         <div class="form-group">
           <label>Where could this workflow fail? (Failure Modes)</label>
@@ -589,27 +584,24 @@ class App {
         <div class="metric-card">
           <div class="metric-header">
             <span class="metric-title">JSON Specification</span>
-            <span class="icon">📄</span>
           </div>
-          <p style="color: var(--text-secondary); margin-bottom: 20px">Export the full machine-readable workflow specification for integration or backup.</p>
+          <p>Export the full machine-readable workflow specification for integration or backup.</p>
           <button id="export-json" class="btn btn-primary">Export JSON</button>
         </div>
 
         <div class="metric-card">
           <div class="metric-header">
             <span class="metric-title">Markdown Document</span>
-            <span class="icon">📝</span>
           </div>
-          <p style="color: var(--text-secondary); margin-bottom: 20px">Generate a structured governance report in Markdown format for documentation.</p>
+          <p>Generate a structured governance report in Markdown format for documentation.</p>
           <button id="export-markdown" class="btn btn-primary">Export Markdown</button>
         </div>
 
         <div class="metric-card">
           <div class="metric-header">
             <span class="metric-title">Printable Report (PDF)</span>
-            <span class="icon">🖨️</span>
           </div>
-          <p style="color: var(--text-secondary); margin-bottom: 20px">Generate a professional, human-readable PDF report of the workflow design.</p>
+          <p>Generate a professional, human-readable PDF report of the workflow design.</p>
           <button id="export-pdf" class="btn btn-primary">Export PDF / Print</button>
         </div>
       </div>
