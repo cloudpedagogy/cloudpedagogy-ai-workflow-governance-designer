@@ -1,8 +1,8 @@
 :root {
   --bg-color: #FFFFFF;
   --text-primary: #111111;
-  --text-secondary: #444444;
-  --text-muted: #666666;
+  --text-secondary: #555555;
+  --text-muted: #555555;
   --border-color: #E5E7EB;
   --accent-color: #111111;
   --accent-hover: #333333;
@@ -12,6 +12,18 @@
   --sidebar-width: 260px;
   --top-bar-height: 60px;
   --font-system: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+
+  /* Design System Foundation */
+  --color-text-primary: #111111;
+  --color-text-secondary: #555555;
+  --color-border-default: #e0e0e0;
+  --color-border-strong: #000000;
+  --font-size-body: 14px;
+  --font-size-meta: 13px;
+  --font-size-small: 12px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
 }
 
 * {
@@ -56,7 +68,8 @@ body {
 
 .logo a {
   color: var(--text-primary);
-  text-decoration: none;
+  text-decoration: underline;
+  text-underline-offset: 4px;
 }
 
 .nav-links {
@@ -107,7 +120,7 @@ body {
 }
 
 .completeness-mini .label {
-  font-size: 0.7rem;
+  font-size: var(--font-size-meta);
   color: var(--text-muted);
   text-transform: uppercase;
   font-weight: 600;
@@ -156,10 +169,11 @@ body {
 }
 
 .brand-link {
-  font-size: 0.65rem;
+  font-size: var(--font-size-meta);
   font-weight: 600;
   color: var(--text-muted);
-  text-decoration: none;
+  text-decoration: underline;
+  text-underline-offset: 2px;
   text-transform: uppercase;
   letter-spacing: 0.05em;
   margin-bottom: -4px;
@@ -238,7 +252,7 @@ h1 {
 
 .btn-sm {
   padding: 4px 10px;
-  font-size: 0.75rem;
+  font-size: var(--font-size-meta);
 }
 
 /* Cards & Sections */
@@ -262,7 +276,7 @@ h2 {
 }
 
 h4 {
-  font-size: 0.8rem;
+  font-size: var(--font-size-meta);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -282,7 +296,7 @@ p {
 
 label {
   display: block;
-  font-size: 0.8rem;
+  font-size: var(--font-size-meta);
   color: var(--text-secondary);
   margin-bottom: 6px;
   font-weight: 600;
@@ -300,8 +314,9 @@ input, textarea, select {
   transition: border-color 0.15s ease;
 }
 
-input:focus, textarea:focus, select:focus {
-  outline: none;
+input:focus, textarea:focus, select:focus, button:focus-visible {
+  outline: 2px solid rgba(0, 0, 0, 0.2);
+  outline-offset: 2px;
   border-color: var(--text-primary);
 }
 
@@ -335,7 +350,7 @@ input:focus, textarea:focus, select:focus {
 }
 
 .metric-title {
-  font-size: 0.8rem;
+  font-size: var(--font-size-meta);
   font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
@@ -384,7 +399,7 @@ input:focus, textarea:focus, select:focus {
 .step-type-pill {
   padding: 2px 8px;
   border-radius: 4px;
-  font-size: 0.7rem;
+  font-size: var(--font-size-meta);
   font-weight: 600;
   background: white;
   border: 1px solid var(--border-color);
@@ -408,7 +423,7 @@ input:focus, textarea:focus, select:focus {
 }
 
 .footer-text {
-  font-size: 0.75rem;
+  font-size: var(--font-size-meta);
   color: var(--text-muted);
 }
 
@@ -417,7 +432,7 @@ input:focus, textarea:focus, select:focus {
   background: #111111 !important;
   color: white !important;
   padding: 8px 40px !important;
-  font-size: 0.8rem !important;
+  font-size: var(--font-size-meta) !important;
   font-weight: 500 !important;
 }
 
