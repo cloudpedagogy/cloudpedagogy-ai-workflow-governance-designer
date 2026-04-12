@@ -1,7 +1,50 @@
-import type { WorkflowStore } from '../data/model';
+import { calculateAIDependency, calculateCompleteness, type WorkflowStore } from '../data/model';
+
+export function mapStoreToSchema(store: WorkflowStore) {
+  return {
+    metadata: {
+      workflow_id: store.metadata.id,
+      workflow_title: store.metadata.title,
+      version: store.metadata.version,
+      created_at: store.metadata.created_at,
+      workflow_owner: store.metadata.owner,
+      organisation: store.metadata.organisation,
+      purpose: store.metadata.purpose,
+      domain: store.metadata.domain
+    },
+    steps: store.steps.map(step => ({
+      step_id: step.id,
+      step_name: step.name,
+      step_type: step.type,
+      description: step.description,
+      inputs: step.inputs,
+      outputs: step.outputs,
+      ai_involvement: step.ai_involvement,
+      human_oversight: step.human_oversight,
+      risks: step.risks,
+      controls: step.controls
+    })),
+    reflection: store.reflection,
+    design_time_metrics: {
+      _disclaimer: "These metrics are indicative design-time markers and must be recalculated by downstream authoritative audit tools (e.g. AI Governance Risk Scanner).",
+      completeness_score: calculateCompleteness(store),
+      ai_dependency_score: calculateAIDependency(store)
+    }
+  };
+}
 
 export function exportToJSON(store: WorkflowStore) {
-  const dataStr = JSON.stringify(store, null, 2);
+  // Validation
+  const required = ['title', 'owner', 'purpose'];
+  const missing = required.filter(f => !store.metadata[f as keyof typeof store.metadata]);
+  
+  if (missing.length > 0) {
+    alert(`Critical Schema Failure: Missing required fields: ${missing.join(', ')}. Please complete these before exporting.`);
+    return;
+  }
+
+  const schemaCompliant = mapStoreToSchema(store);
+  const dataStr = JSON.stringify(schemaCompliant, null, 2);
   const dataUri = 'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr);
   const exportFileDefaultName = `workflow-${store.metadata.title.toLowerCase().replace(/\s+/g, '-') || 'untitled'}.json`;
 

@@ -1,5 +1,15 @@
 import './style.css';
-import { INITIAL_STATE, calculateCompleteness, calculateAIDependency, getHumanOversightIndicator, DEMO_STATE } from './data/model';
+import { 
+  INITIAL_STATE, 
+  calculateCompleteness, 
+  calculateAIDependency, 
+  getHumanOversightIndicator, 
+  DEMO_STATE,
+  getGovernanceSuggestions,
+  detectOversightGaps,
+  detectConsecutiveAISteps,
+  isHighRiskStep
+} from './data/model';
 import type { WorkflowStore } from './data/model';
 import { exportToJSON, exportToMarkdown, exportToPDF } from './utils/export';
 import { generateUUID } from './utils/uuid';
@@ -191,6 +201,37 @@ class App {
       </div>
 
       <div class="section" style="margin-top: 32px">
+        <h2>Governance Insights</h2>
+        <div class="insights-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 16px">
+          <div class="insight-group">
+            <h3 style="font-size: 14px; margin-bottom: 12px; color: var(--text-primary)">Design-Time Suggestions</h3>
+            <ul style="list-style: none; padding: 0; margin: 0; font-size: 13px">
+              ${getGovernanceSuggestions(this.store).map(s => `
+                <li style="padding: 10px; background: ${s.type === 'warning' ? '#FFFBEB' : '#F0F9FF'}; border-left: 3px solid ${s.type === 'warning' ? '#F59E0B' : '#0EA5E9'}; margin-bottom: 8px; border-radius: 4px; color: ${s.type === 'warning' ? '#92400E' : '#0369A1'}">
+                  <strong>${s.type.toUpperCase()}:</strong> ${s.message}
+                </li>
+              `).join('') || '<li style="color: var(--text-muted); font-style: italic">No immediate suggestions.</li>'}
+            </ul>
+          </div>
+          <div class="insight-group">
+            <h3 style="font-size: 14px; margin-bottom: 12px; color: var(--text-primary)">Workflow Pattern Analysis</h3>
+            <div class="pattern-item" style="font-size: 13px; margin-bottom: 16px">
+              <span style="display: block; font-weight: 600; margin-bottom: 4px">Consecutive AI Steps:</span>
+              <span style="color: ${detectConsecutiveAISteps(this.store).length > 0 ? '#B91C1C' : '#059669'}">
+                ${detectConsecutiveAISteps(this.store).length > 0 ? `Detected ${detectConsecutiveAISteps(this.store).length} sequences of consecutive AI reliance.` : 'No excessive AI reliance clusters detected.'}
+              </span>
+            </div>
+            <div class="pattern-item" style="font-size: 13px">
+              <span style="display: block; font-weight: 600; margin-bottom: 4px">Oversight Completeness:</span>
+              <span style="color: ${detectOversightGaps(this.store).length > 0 ? '#B91C1C' : '#059669'}">
+                ${detectOversightGaps(this.store).length > 0 ? `Found ${detectOversightGaps(this.store).length} AI steps with zero human oversight.` : 'All AI steps have defined oversight levels.'}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section" style="margin-top: 32px">
         <h2>Capability Intent</h2>
         <p>This workflow aims to operationalise governed AI involvement through explicit traceability and accountability.</p>
         <div class="cdd-pills" style="display: flex; gap: 8px; margin-top: 16px">
@@ -271,7 +312,12 @@ class App {
       </div>
       
       <div id="steps-list">
-        ${this.store.steps.map((step, index) => this.renderStepItem(step, index)).join('')}
+        ${this.store.steps.map((step, index) => {
+          const isHighRisk = isHighRiskStep(step);
+          const hasGaps = (step.type === 'ai-generated' || step.type === 'ai-supported') && step.human_oversight.oversight_level === 'none';
+          
+          return this.renderStepItem(step, index, isHighRisk, hasGaps);
+        }).join('')}
       </div>
 
       ${this.store.steps.length === 0 ? `
@@ -282,7 +328,7 @@ class App {
     `;
   }
 
-  private renderStepItem(step: any, index: number) {
+  private renderStepItem(step: any, index: number, isHighRisk: boolean = false, hasGaps: boolean = false) {
     const types: Record<string, string> = {
       'human-only': 'Human Only',
       'ai-supported': 'AI Supported',
@@ -297,6 +343,9 @@ class App {
             <span class="step-number" style="font-weight: 700; color: var(--text-muted)">${index + 1}</span>
             <span style="font-weight: 600">${step.name || 'Untitled Step'}</span>
             <span class="step-type-pill">${types[step.type]}</span>
+            ${isHighRisk ? '<span class="step-type-pill" style="background: #FEE2E2; color: #991B1B; border: 1px solid #FECACA">⚠️ High Risk</span>' : ''}
+            ${step.human_oversight.intervention_points ? '<span class="step-type-pill" style="background: #E0F2FE; color: #075985; border: 1px solid #BAE6FD">🔗 Intervention Pt</span>' : ''}
+            ${hasGaps ? '<span class="step-type-pill" style="background: #FFFBEB; color: #92400E; border: 1px solid #FDE68A">❗ Missing Oversight</span>' : ''}
           </div>
           <div style="display: flex; gap: 8px">
             <button class="btn btn-secondary btn-sm edit-step">Edit</button>

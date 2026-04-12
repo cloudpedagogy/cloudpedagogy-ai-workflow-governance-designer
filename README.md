@@ -2,6 +2,25 @@
 
 A governance-first design environment for creating, analysing, and documenting AI-supported workflows with explicit human oversight and accountability.
 
+## 🔗 Role in the CloudPedagogy Ecosystem
+
+**Phase:** Phase 2 — Governance Pipeline
+
+**Role:**
+Specifies the governance structure of AI-supported workflows by defining decision points, oversight roles, and risk controls at the design stage.
+
+**Upstream Inputs:**
+Institutional policy, user-defined workflow requirements, or maturity assessment outcomes.
+
+**Downstream Outputs:**
+Provides the structured workflow specification used by the **AI Governance Risk Scanner** and mandated contexts for the **Human-AI Decision Record**.
+
+**Does NOT:**
+- Perform authoritative, independent risk audits (this is for the Scanner).
+- Record live individual decision outcomes in production.
+
+For a full system overview, see: [SYSTEM_OVERVIEW.md](../SYSTEM_OVERVIEW.md)
+
 ## 🚀 Overview
 The **AI Workflow Governance Designer** enables users to design structured workflows, define human–AI boundaries, and embed governance and risk controls directly into the system design. It is built on Capability-Driven Development (CDD) principles to ensure traceability and professional-grade governance.
 

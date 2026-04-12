@@ -179,3 +179,84 @@ export function getHumanOversightIndicator(store: WorkflowStore) {
     steps: lackingOversight.map(s => s.name)
   };
 }
+
+export function isHighRiskStep(step: WorkflowStep): boolean {
+  if (step.ai_involvement.reliance_level === 'high' || step.ai_involvement.reliance_level === 'critical') {
+    return true;
+  }
+  if (step.type === 'ai-generated' && step.human_oversight.oversight_level !== 'full') {
+    return true;
+  }
+  return false;
+}
+
+export function detectOversightGaps(store: WorkflowStore): WorkflowStep[] {
+  return store.steps.filter(s => 
+    (s.type === 'ai-generated' || s.type === 'ai-supported') && 
+    s.human_oversight.oversight_level === 'none'
+  );
+}
+
+export function detectConsecutiveAISteps(store: WorkflowStore): number[][] {
+  const sequences: number[][] = [];
+  let currentSeq: number[] = [];
+
+  store.steps.forEach((step, index) => {
+    if (step.type === 'ai-generated' || step.type === 'ai-supported') {
+      currentSeq.push(index);
+    } else {
+      if (currentSeq.length >= 2) {
+        sequences.push([...currentSeq]);
+      }
+      currentSeq = [];
+    }
+  });
+
+  if (currentSeq.length >= 2) {
+    sequences.push(currentSeq);
+  }
+
+  return sequences;
+}
+
+export interface GovernanceSuggestion {
+  type: 'warning' | 'info';
+  message: string;
+  stepIdx?: number;
+}
+
+export function getGovernanceSuggestions(store: WorkflowStore): GovernanceSuggestion[] {
+  const suggestions: GovernanceSuggestion[] = [];
+
+  store.steps.forEach((step, index) => {
+    // High AI Reliance Pattern
+    if (isHighRiskStep(step) && (step.human_oversight.oversight_level === 'minimal' || step.human_oversight.oversight_level === 'none')) {
+      suggestions.push({
+        type: 'warning',
+        message: `Step ${index + 1} ("${step.name}") has high AI reliance with insufficient oversight. Consider upgrading to 'Active' or 'Full' oversight.`,
+        stepIdx: index
+      });
+    }
+
+    // Decision Point Pattern
+    if (step.type === 'decision-point' && !step.controls.approval_required) {
+      suggestions.push({
+        type: 'info',
+        message: `Step ${index + 1} is a Decision Point. Governance best practice suggests enabling 'Approval Required' for traceability.`,
+        stepIdx: index
+      });
+    }
+  });
+
+  // Consecutive AI Pattern
+  const aiClusters = detectConsecutiveAISteps(store);
+  if (aiClusters.length > 0) {
+    suggestions.push({
+      type: 'warning',
+      message: `Detected ${aiClusters.length} consecutive AI-only sequence(s). Consider inserting a human-only review step to prevent logic drift.`
+    });
+  }
+
+  return suggestions;
+}
+
