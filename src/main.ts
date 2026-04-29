@@ -288,6 +288,24 @@ class App {
             </div>
           </div>
         </form>
+
+        <!-- Lightweight capability and governance layer -->
+        <!-- Optional, non-blocking, and does not alter core workflow -->
+        <details class="section" style="margin-top: 32px; border: 1px solid var(--border-color); border-radius: 8px; padding: 0;">
+          <summary style="padding: 16px; cursor: pointer; font-weight: 600; font-size: 14px; color: var(--text-secondary);">
+            Capability & Governance Notes (Optional)
+          </summary>
+          <div style="padding: 16px; border-top: 1px solid var(--border-color); background: #fafafa;">
+            <div class="form-group">
+              <label style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted);">AI Capability Notes</label>
+              <textarea id="capabilityNotes" rows="2" style="font-size: 13px; font-family: inherit;" placeholder="How does this workflow develop AI capability?">${metadata.capabilityNotes || ''}</textarea>
+            </div>
+            <div class="form-group" style="margin-bottom: 0;">
+              <label style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted);">AI Governance Notes</label>
+              <textarea id="governanceNotes" rows="2" style="font-size: 13px; font-family: inherit;" placeholder="Key governance considerations for this workflow...">${metadata.governanceNotes || ''}</textarea>
+            </div>
+          </div>
+        </details>
       </div>
     `;
   }
@@ -297,10 +315,20 @@ class App {
     form?.addEventListener('input', (e) => {
       const target = e.target as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
       const key = target.id as keyof typeof this.store.metadata;
-      if (key in this.store.metadata) {
+      if (key in this.store.metadata || key === 'capabilityNotes' || key === 'governanceNotes') {
         (this.store.metadata as any)[key] = target.value;
         this.saveToStorage();
       }
+    });
+
+    document.getElementById('capabilityNotes')?.addEventListener('input', (e) => {
+      this.store.metadata.capabilityNotes = (e.target as HTMLTextAreaElement).value;
+      this.saveToStorage();
+    });
+
+    document.getElementById('governanceNotes')?.addEventListener('input', (e) => {
+      this.store.metadata.governanceNotes = (e.target as HTMLTextAreaElement).value;
+      this.saveToStorage();
     });
   }
 

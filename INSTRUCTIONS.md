@@ -47,3 +47,10 @@ This tool enables teams to formally design, document, and map risk controls for 
 ---
 ### 10. Tips
 - Be extremely explicit about the "Fallback mechanism" for any step where an AI system might fail or hallucinate.
+
+---
+### 11. Capability and Governance
+- **What the tool does**: This tool enables teams to formally design, document, and map risk controls for AI-supported processes.
+- **How capability is developed through use**: Capability is developed by forcing process owners to explicitly think through human-AI boundaries, reliance levels, and intervention points.
+- **How governance is supported**: Governance is supported by creating a visible, auditable record of designed oversight and risk mitigation strategies.
+- **Optional Fields**: The "Capability & Governance Notes" section allows for documenting specific capability development goals and high-level governance reflections that supplement the step-by-step risk mapping.

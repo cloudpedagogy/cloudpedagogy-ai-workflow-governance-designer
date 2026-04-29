@@ -10,7 +10,9 @@ export function mapStoreToSchema(store: WorkflowStore) {
       workflow_owner: store.metadata.owner,
       organisation: store.metadata.organisation,
       purpose: store.metadata.purpose,
-      domain: store.metadata.domain
+      domain: store.metadata.domain,
+      capability_notes: store.metadata.capabilityNotes || '',
+      governance_notes: store.metadata.governanceNotes || ''
     },
     steps: store.steps.map(step => ({
       step_id: step.id,
@@ -63,7 +65,10 @@ export function generateMarkdown(store: WorkflowStore): string {
   md += `- **Purpose**: ${store.metadata.purpose}\n`;
   md += `- **Domain**: ${store.metadata.domain}\n`;
   md += `- **Version**: ${store.metadata.version}\n`;
-  md += `- **Created At**: ${store.metadata.created_at}\n\n`;
+  md += `- **Created At**: ${store.metadata.created_at}\n`;
+  if (store.metadata.capabilityNotes) md += `- **AI Capability Notes**: ${store.metadata.capabilityNotes}\n`;
+  if (store.metadata.governanceNotes) md += `- **AI Governance Notes**: ${store.metadata.governanceNotes}\n`;
+  md += `\n`;
 
   md += `## 2. Workflow Steps\n\n`;
   store.steps.forEach((step, index) => {

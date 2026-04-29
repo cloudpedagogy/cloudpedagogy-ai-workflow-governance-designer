@@ -43,6 +43,8 @@ export interface WorkflowMetadata {
   organisation: string;
   purpose: string;
   domain: string;
+  capabilityNotes?: string;
+  governanceNotes?: string;
 }
 
 export interface Reflection {
@@ -67,7 +69,9 @@ export const INITIAL_STATE: WorkflowStore = {
     owner: '',
     organisation: '',
     purpose: '',
-    domain: 'education'
+    domain: 'education',
+    capabilityNotes: '',
+    governanceNotes: ''
   },
   steps: [],
   reflection: {
@@ -87,7 +91,9 @@ export const DEMO_STATE: WorkflowStore = {
     owner: 'Dr. Sarah Chen, Chief of Radiology',
     organisation: 'Metro Health Alliance',
     purpose: 'To provide automated preliminary screening of chest X-rays to prioritise urgent cases for radiologist review.',
-    domain: 'research'
+    domain: 'research',
+    capabilityNotes: 'This workflow supports the development of AI-assisted diagnostic capability by standardising the preliminary screening process and ensuring radiologists maintain final diagnostic authority.',
+    governanceNotes: 'Governance is managed through mandatory human approval of low-priority triage flags and regular retrospective audits of AI performance.'
   },
   steps: [
     {

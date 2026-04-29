@@ -127,3 +127,12 @@ CloudPedagogy develops open, governance-credible resources for building confiden
 
 - Website: https://www.cloudpedagogy.com/
 - Framework: https://github.com/cloudpedagogy/cloudpedagogy-ai-capability-framework
+
+---
+
+## Capability and Governance
+This tool supports both AI capability development and lightweight governance.
+- **Capability** is developed through structured interaction with real workflows.
+- **Governance** is supported through optional fields that make assumptions, risks, and decisions visible.
+
+All governance inputs are optional and designed to support — not constrain — professional judgement.

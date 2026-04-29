@@ -56,3 +56,9 @@ Only tool in the ecosystem that forces the explicit design of "Human Oversight L
 
 ## 15. Anything Unclear or Inferred from Repo Contents
 "Decision-Point" is treated as a specialized StepType that triggers human-only sign-off logic in the export model.
+
+## 16. Capability and Governance Alignment
+This tool is aligned with the CloudPedagogy Capability and Governance standard.
+- **Capability**: The tool supports development of practical AI capability through structured interaction and workflow use.
+- **Governance**: The tool includes lightweight, optional fields that make assumptions, risks, and decisions visible and reviewable.
+This alignment ensures the tool supports both effective use of AI and responsible, accountable practice.
