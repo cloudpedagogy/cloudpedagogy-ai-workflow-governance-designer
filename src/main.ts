@@ -106,7 +106,7 @@ export class App {
 
     el.className = 'save-status-badge';
 
-    if (this.isDemoMode) {
+    if (this.isDemoMode && status !== 'error') {
       el.classList.add('status-demo');
       el.textContent = 'Demo Mode (In-Memory Only)';
       el.title = 'Changes exist in memory only and will not overwrite your saved workflow.';
@@ -223,6 +223,7 @@ export class App {
       if (!existingBtn) {
         const btn = document.createElement('button');
         btn.id = 'restore-backup';
+        btn.type = 'button';
         btn.className = 'btn btn-secondary';
         btn.setAttribute('aria-label', 'Restore previous workflow from protective backup');
         btn.textContent = 'Restore Backup';
@@ -250,21 +251,52 @@ export class App {
       return false;
     }
 
-    const restored = this.storageManager.restoreProtectiveBackup();
-    if (!restored) {
-      this.updateSaveStatus('error', 'Failed to restore workflow from protective backup.');
-      alert('Failed to restore protective backup due to a storage error.');
+    const restoreResult = this.storageManager.restoreProtectiveBackupWithFallback();
+    if (!restoreResult.success || !restoreResult.data) {
+      this.updateSaveStatus('error', restoreResult.error || 'Failed to restore workflow from protective backup.');
+      this.syncRestoreBackupButton();
+      alert(`Failed to restore protective backup: ${restoreResult.error || 'Storage error.'}`);
       return false;
     }
 
+    if (restoreResult.persisted) {
+      this.isDemoMode = false;
+      this.preDemoStore = null;
+      this.preDemoHadUnsavedChanges = false;
+      this.hideDemoBanner();
+      this.hideCorruptedBanner();
+      this.store = restoreResult.data;
+      this.hasUnsavedChanges = false;
+      this.updateSaveStatus('saved');
+      this.render();
+      alert(`Restored workflow "${this.store.metadata.title || 'Untitled Draft'}" from protective backup.`);
+      return true;
+    }
+
+    // Active localStorage write failed, but the validated backup is available for safe in-memory recovery
+    const recoverInMemory = confirm(
+      `Active local storage could not be updated (${restoreResult.error}).\n\nWould you like to recover the backup workflow into memory so you can view and export it?`
+    );
+    if (!recoverInMemory) {
+      this.updateSaveStatus('error', restoreResult.error);
+      this.syncRestoreBackupButton();
+      return false;
+    }
+
+    this.store = restoreResult.data;
     this.isDemoMode = false;
     this.preDemoStore = null;
     this.preDemoHadUnsavedChanges = false;
+    this.hasUnsavedChanges = true;
     this.hideDemoBanner();
-    this.hideCorruptedBanner();
-    this.loadFromStorage();
+    this.updateSaveStatus(
+      'error',
+      `Backup recovered in memory only (unsaved in local storage): ${restoreResult.error}`
+    );
     this.render();
-    alert(`Restored workflow "${this.store.metadata.title || 'Untitled Draft'}" from protective backup.`);
+    alert(
+      `Workflow "${this.store.metadata.title || 'Untitled Draft'}" recovered into memory only (could not persist to local storage: ${restoreResult.error}).\n\nYour workflow is currently UNSAVED. Open the "Export" tab and click "Export Draft / Recovery JSON" immediately.`
+    );
     return true;
   }
 
@@ -280,8 +312,8 @@ export class App {
           <strong>Demo Example (In-Memory Only):</strong> You are exploring pre-filled workflow data. Your saved workflows are not overwritten.
         </div>
         <div class="demo-banner-actions">
-          <button id="save-demo-copy" class="btn btn-sm btn-primary-light" aria-label="Save copy as your own workflow">Save Copy as My Workflow</button>
-          <button id="exit-demo" class="btn btn-sm btn-secondary-light" aria-label="Exit demo mode and return to your saved workflow">Exit Demo</button>
+          <button id="save-demo-copy" type="button" class="btn btn-sm btn-primary-light" aria-label="Save copy as your own workflow">Save Copy as My Workflow</button>
+          <button id="exit-demo" type="button" class="btn btn-sm btn-secondary-light" aria-label="Exit demo mode and return to your saved workflow">Exit Demo</button>
         </div>
       `;
       document.querySelector('.content')?.prepend(banner);
@@ -301,10 +333,21 @@ export class App {
   }
 
   private saveDemoAsMyWorkflow(): boolean {
-    const hasExistingWork = hasMeaningfulWorkflowData(this.preDemoStore);
-    const confirmPrompt = hasExistingWork
-      ? 'Save this demo copy as your active workflow? This will replace your existing workflow in local storage (a protective backup of your previous workflow will be created first).'
-      : 'Save this demo copy as your own workflow in local storage?';
+    const hasExistingWork =
+      hasMeaningfulWorkflowData(this.preDemoStore) ||
+      this.storageManager.wouldCreateBackup(this.preDemoStore || undefined);
+    const divergent = this.storageManager.hasDivergentUnsavedWork(this.preDemoStore || undefined);
+
+    let confirmPrompt: string;
+    if (divergent) {
+      confirmPrompt =
+        'Save this demo copy as your active workflow? This will replace your existing workflow. Note: your pre-demo workflow has unsaved in-memory edits that differ from your last saved version; the single protective backup slot will preserve your latest unsaved pre-demo version (not both versions). Use "Export Draft / Recovery JSON" first if you require both.';
+    } else if (hasExistingWork) {
+      confirmPrompt =
+        'Save this demo copy as your active workflow? This will replace your existing workflow in local storage (a protective backup of your previous workflow will be created first).';
+    } else {
+      confirmPrompt = 'Save this demo copy as your own workflow in local storage?';
+    }
 
     if (!confirm(confirmPrompt)) {
       return false;
@@ -313,24 +356,28 @@ export class App {
     // Create and verify protective backup of the original workflow before replacing
     const backupResult = this.storageManager.createProtectiveBackup(this.preDemoStore || undefined);
     if (!backupResult.success) {
+      this.updateSaveStatus('error', backupResult.error);
+      this.syncRestoreBackupButton();
       alert(
         `Cannot replace existing workflow: Protective backup failed (${backupResult.error}).\n\nYour existing workflow has not been modified. You can export your demo copy from the "Export" tab.`
       );
       return false;
     }
 
-    // Generate fresh workflow ID so it's saved as the user's own workflow
-    this.store.metadata.id = generateUUID();
-    this.store.metadata.created_at = new Date().toISOString();
+    // Prepare candidate workflow copy with a fresh UUID
+    const candidateStore: WorkflowStore = JSON.parse(JSON.stringify(this.store));
+    candidateStore.metadata.id = generateUUID();
+    candidateStore.metadata.created_at = new Date().toISOString();
 
-    const saveResult = this.storageManager.saveWorkflow(this.store);
-    this.isDemoMode = false;
-    this.preDemoStore = null;
-    this.preDemoHadUnsavedChanges = false;
-    this.hideDemoBanner();
+    const saveResult = this.storageManager.saveWorkflow(candidateStore);
 
     if (saveResult.success) {
+      this.store = candidateStore;
+      this.isDemoMode = false;
+      this.preDemoStore = null;
+      this.preDemoHadUnsavedChanges = false;
       this.hasUnsavedChanges = false;
+      this.hideDemoBanner();
       this.updateSaveStatus('saved');
       this.render();
       alert(
@@ -340,11 +387,17 @@ export class App {
       );
       return true;
     } else {
+      // Roll back protective backup to previousBackup if one existed prior to this failed save
+      const rollback = this.storageManager.rollbackProtectiveBackup(backupResult.previousBackup);
+      // Keep demo mode, preDemoStore, preDemoHadUnsavedChanges, and #demo-banner intact!
       this.hasUnsavedChanges = true;
       this.updateSaveStatus('error', saveResult.error);
-      this.render();
+      this.syncRestoreBackupButton();
+      this.renderView();
+
+      const rollbackNotice = !rollback.rolledBack && rollback.error ? `\n\nBackup note: ${rollback.error}` : '';
       alert(
-        `Workflow copied to memory, but failed to write to local storage:\n${saveResult.error}\n\nOpen the "Export" tab and click "Export Draft / Recovery JSON" or "Export JSON" to save your work.`
+        `Failed to save demo copy to local storage:\n${saveResult.error}${rollbackNotice}\n\nYou remain in Demo Mode: your demo edits are still in memory (exportable via the "Export" tab) and you can click "Exit Demo" to return to your previous workflow.`
       );
       return false;
     }
@@ -433,42 +486,70 @@ export class App {
     });
 
     document.getElementById('new-workflow')?.addEventListener('click', () => {
+      if (this.storageManager.isCorruptedStorageLocked()) {
+        this.updateSaveStatus(
+          'error',
+          'Local storage contains unrecovered corrupted data. Resolve or download the corrupted data before replacing the workflow.'
+        );
+        alert(
+          'Cannot create new workflow: Local storage contains unrecovered corrupted data. Resolve or download the corrupted data first.'
+        );
+        return;
+      }
+
       const backupTarget = this.isDemoMode && this.preDemoStore ? this.preDemoStore : this.store;
+      const willBackup = this.storageManager.wouldCreateBackup(backupTarget);
+      const divergent = this.storageManager.hasDivergentUnsavedWork(backupTarget);
+
+      let confirmMsg: string;
+      if (divergent) {
+        confirmMsg =
+          'Clear all data and start a new workflow? You have unsaved in-memory edits that differ from your last saved workflow: the single protective backup slot will preserve your latest unsaved in-memory version (not both versions). Cancel and use "Export Draft / Recovery JSON" first if you need both.';
+      } else if (willBackup) {
+        confirmMsg =
+          'Clear all data and start a new workflow? A protective backup of your previous workflow has been saved.';
+      } else {
+        confirmMsg = 'Clear all data and start a new workflow?';
+      }
+
+      if (!confirm(confirmMsg)) {
+        return;
+      }
+
       const backupResult = this.storageManager.createProtectiveBackup(backupTarget);
       if (!backupResult.success) {
+        this.updateSaveStatus('error', backupResult.error);
+        this.syncRestoreBackupButton();
         alert(
           `Cannot create new workflow: Protective backup failed (${backupResult.error}).\n\nOpen the "Export" tab and click "Export Draft / Recovery JSON" first to prevent data loss.`
         );
         return;
       }
 
-      const confirmMsg = backupResult.backedUp
-        ? 'Clear all data and start a new workflow? A protective backup of your previous workflow has been saved.'
-        : 'Clear all data and start a new workflow?';
+      const newStore: WorkflowStore = JSON.parse(JSON.stringify(INITIAL_STATE));
+      newStore.metadata.id = generateUUID();
+      newStore.metadata.created_at = new Date().toISOString();
 
-      if (confirm(confirmMsg)) {
-        const newStore: WorkflowStore = JSON.parse(JSON.stringify(INITIAL_STATE));
-        newStore.metadata.id = generateUUID();
-        newStore.metadata.created_at = new Date().toISOString();
-
-        const saveResult = this.storageManager.saveWorkflow(newStore);
-        if (!saveResult.success) {
-          this.updateSaveStatus('error', saveResult.error);
-          alert(
-            `Cannot create new workflow because local storage could not be updated:\n${saveResult.error}\n\nYour previous workflow has been preserved.`
-          );
-          return;
-        }
-
-        this.store = newStore;
-        this.isDemoMode = false;
-        this.preDemoStore = null;
-        this.preDemoHadUnsavedChanges = false;
-        this.hasUnsavedChanges = false;
-        this.hideDemoBanner();
-        this.updateSaveStatus('saved');
-        this.render();
+      const saveResult = this.storageManager.saveWorkflow(newStore);
+      if (!saveResult.success) {
+        const rollback = this.storageManager.rollbackProtectiveBackup(backupResult.previousBackup);
+        this.updateSaveStatus('error', saveResult.error);
+        this.syncRestoreBackupButton();
+        const rollbackNotice = !rollback.rolledBack && rollback.error ? `\n\nBackup note: ${rollback.error}` : '';
+        alert(
+          `Cannot create new workflow because local storage could not be updated:\n${saveResult.error}${rollbackNotice}\n\nYour previous workflow has been preserved.`
+        );
+        return;
       }
+
+      this.store = newStore;
+      this.isDemoMode = false;
+      this.preDemoStore = null;
+      this.preDemoHadUnsavedChanges = false;
+      this.hasUnsavedChanges = false;
+      this.hideDemoBanner();
+      this.updateSaveStatus('saved');
+      this.render();
     });
   }
 
@@ -1124,8 +1205,17 @@ export class App {
 
     // 3. Create protective backup before replacing current work
     const backupTarget = this.isDemoMode && this.preDemoStore ? this.preDemoStore : this.store;
+    if (this.storageManager.hasDivergentUnsavedWork(backupTarget)) {
+      const proceedWithSingleSlot = confirm(
+        'You have unsaved in-memory edits that differ from your last saved workflow. Importing will preserve your latest unsaved in-memory version in the single backup slot (it cannot preserve both versions). Cancel and use "Export Draft / Recovery JSON" first if you need both.\n\nProceed with import?'
+      );
+      if (!proceedWithSingleSlot) return false;
+    }
+
     const backupResult = this.storageManager.createProtectiveBackup(backupTarget);
     if (!backupResult.success) {
+      this.updateSaveStatus('error', backupResult.error);
+      this.syncRestoreBackupButton();
       alert(
         `Import Aborted: Protective backup failed (${backupResult.error}).\n\nYour existing workflow could not be safely backed up. Open the "Export" tab and click "Export Draft / Recovery JSON" first.`
       );
@@ -1137,9 +1227,12 @@ export class App {
     // 4. Verify persistence before replacing in-memory workflow
     const saveResult = this.storageManager.saveWorkflow(importedStore);
     if (!saveResult.success) {
+      const rollback = this.storageManager.rollbackProtectiveBackup(backupResult.previousBackup);
       this.updateSaveStatus('error', saveResult.error);
+      this.syncRestoreBackupButton();
+      const rollbackNotice = !rollback.rolledBack && rollback.error ? `\n\nBackup note: ${rollback.error}` : '';
       alert(
-        `Import Aborted — Local storage could not be updated:\n${saveResult.error}\n\nYour previous workflow has been preserved.`
+        `Import Aborted — Local storage could not be updated:\n${saveResult.error}${rollbackNotice}\n\nYour previous workflow has been preserved.`
       );
       return false;
     }

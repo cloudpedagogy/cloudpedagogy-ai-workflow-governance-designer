@@ -23,6 +23,20 @@ export interface StorageSaveResult {
 export interface BackupResult {
   success: boolean;
   backedUp?: boolean;
+  previousBackup?: string | null;
+  divergentFromPersisted?: boolean;
+  error?: string;
+}
+
+export interface BackupRollbackResult {
+  rolledBack: boolean;
+  error?: string;
+}
+
+export interface BackupRestoreResult {
+  success: boolean;
+  persisted: boolean;
+  data?: WorkflowStore;
   error?: string;
 }
 
@@ -243,10 +257,44 @@ export class StorageManager {
   }
 
   /**
+   * Checks whether the in-memory workflow has meaningful unsaved changes that differ from
+   * a non-empty persisted workflow in STORAGE_KEY.
+   */
+  public hasDivergentUnsavedWork(inMemoryStore?: WorkflowStore): boolean {
+    const s = this.storage;
+    if (!s || !inMemoryStore || !hasMeaningfulWorkflowData(inMemoryStore)) return false;
+    try {
+      const current = s.getItem(STORAGE_KEY);
+      if (!current) return false;
+      const check = validateWorkflowDraft(current);
+      if (!check.valid || !check.store || !hasMeaningfulWorkflowData(check.store)) {
+        return false;
+      }
+      return JSON.stringify(inMemoryStore) !== current;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Checks whether a protective backup would be created for the given state without mutating storage.
+   */
+  public wouldCreateBackup(inMemoryStore?: WorkflowStore): boolean {
+    if (hasMeaningfulWorkflowData(inMemoryStore)) return true;
+    const s = this.storage;
+    if (!s) return false;
+    try {
+      return Boolean(s.getItem(STORAGE_KEY));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Creates and verifies a protective backup before destructive actions
    * (e.g. New Workflow, Import JSON, Save Demo Copy).
    * Protects both persisted storage data and meaningful unsaved in-memory work.
-   * If a required backup fails, destructive operations MUST NOT proceed.
+   * Preserves previousBackup so the caller can roll back if the subsequent save fails.
    */
   public createProtectiveBackup(inMemoryStore?: WorkflowStore): BackupResult {
     const s = this.storage;
@@ -268,8 +316,10 @@ export class StorageManager {
     }
 
     try {
+      const previousBackup = s.getItem(BACKUP_KEY);
       const current = s.getItem(STORAGE_KEY);
       const hasInMemoryWork = hasMeaningfulWorkflowData(inMemoryStore);
+      const divergent = this.hasDivergentUnsavedWork(inMemoryStore);
 
       let payloadToBackup: string | null = null;
       if (hasInMemoryWork && inMemoryStore) {
@@ -281,7 +331,7 @@ export class StorageManager {
 
       if (!payloadToBackup) {
         // Neither stored data nor meaningful in-memory work exists
-        return { success: true, backedUp: false };
+        return { success: true, backedUp: false, previousBackup, divergentFromPersisted: false };
       }
 
       s.setItem(BACKUP_KEY, payloadToBackup);
@@ -290,16 +340,57 @@ export class StorageManager {
         return {
           success: false,
           backedUp: false,
+          previousBackup,
           error: 'Failed to verify protective backup in local storage.'
         };
       }
 
-      return { success: true, backedUp: true };
+      return {
+        success: true,
+        backedUp: true,
+        previousBackup,
+        divergentFromPersisted: divergent
+      };
     } catch (e: any) {
       return {
         success: false,
         backedUp: false,
         error: `Failed to create protective backup: ${e?.message || 'Storage error'}`
+      };
+    }
+  }
+
+  /**
+   * Attempts to restore the previous backup state when a subsequent active-workflow save fails.
+   * If no previous backup existed (previousBackup is null/undefined), retains the newly created
+   * valid backup so a recoverable backup remains available.
+   * Never claims rollback succeeded without verifying the read-back.
+   */
+  public rollbackProtectiveBackup(previousBackup: string | null | undefined): BackupRollbackResult {
+    if (!previousBackup) {
+      return { rolledBack: true };
+    }
+    const s = this.storage;
+    if (!s) {
+      return {
+        rolledBack: false,
+        error: 'Storage unavailable; previous backup slot could not be restored.'
+      };
+    }
+    try {
+      s.setItem(BACKUP_KEY, previousBackup);
+      const verified = s.getItem(BACKUP_KEY);
+      if (verified !== previousBackup) {
+        return {
+          rolledBack: false,
+          error: 'Previous backup slot verification failed; the most recent pre-operation backup remains in place.'
+        };
+      }
+      return { rolledBack: true };
+    } catch (e: any) {
+      return {
+        rolledBack: false,
+        error: `Could not roll back to previous backup (${e?.message || 'storage write error'}); the most recent pre-operation backup remains preserved.`
       };
     }
   }
@@ -328,33 +419,83 @@ export class StorageManager {
   }
 
   /**
-   * Restores protective backup to active storage and verifies it.
+   * Validates and restores protective backup, falling back to safe in-memory recovery
+   * if writing to the active STORAGE_KEY fails. Never deletes or overwrites BACKUP_KEY on failure.
    */
-  public restoreProtectiveBackup(): boolean {
+  public restoreProtectiveBackupWithFallback(): BackupRestoreResult {
     const s = this.storage;
-    if (!s) return false;
+    if (!s) {
+      return {
+        success: false,
+        persisted: false,
+        error: 'Browser storage is unavailable; backup cannot be read.'
+      };
+    }
+
+    let backup: string | null = null;
     try {
-      const backup = s.getItem(BACKUP_KEY);
-      if (!backup) return false;
+      backup = s.getItem(BACKUP_KEY);
+    } catch (e: any) {
+      return {
+        success: false,
+        persisted: false,
+        error: `Failed to read protective backup: ${e?.message || 'Storage read error'}`
+      };
+    }
 
-      const validation = validateWorkflowDraft(backup);
-      if (!validation.valid || !validation.store) {
-        return false;
-      }
+    if (!backup) {
+      return {
+        success: false,
+        persisted: false,
+        error: 'No protective backup found in local storage.'
+      };
+    }
 
+    const validation = validateWorkflowDraft(backup);
+    if (!validation.valid || !validation.store) {
+      return {
+        success: false,
+        persisted: false,
+        error: `Protective backup is invalid: ${validation.errors.join('; ')}`
+      };
+    }
+
+    try {
       s.setItem(STORAGE_KEY, backup);
       const verified = s.getItem(STORAGE_KEY);
       if (verified !== backup) {
-        return false;
+        return {
+          success: true,
+          persisted: false,
+          data: validation.store,
+          error: 'Could not verify write to active local storage.'
+        };
       }
 
       this.isCorruptedLocked = false;
       this.corruptedRawData = null;
       this.hasInspectedStorage = true;
-      return true;
-    } catch {
-      return false;
+      return {
+        success: true,
+        persisted: true,
+        data: validation.store
+      };
+    } catch (e: any) {
+      return {
+        success: true,
+        persisted: false,
+        data: validation.store,
+        error: e?.message || 'Active local storage write failed.'
+      };
     }
+  }
+
+  /**
+   * Restores protective backup to active storage and verifies it.
+   */
+  public restoreProtectiveBackup(): boolean {
+    const result = this.restoreProtectiveBackupWithFallback();
+    return Boolean(result.success && result.persisted);
   }
 
   /**

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { StorageManager, STORAGE_KEY, BACKUP_KEY } from '../utils/storage';
 import { DEMO_STATE, type WorkflowStore } from '../data/model';
+import { exportDraftToJSON } from '../utils/export';
 import { App } from '../main';
 
 class MockStorage implements Storage {
@@ -357,5 +358,193 @@ describe('StorageManager & Persistence Hardening', () => {
     expect(backupRes.success).toBe(true);
     expect(backupRes.backedUp).toBe(true);
     expect(JSON.parse(mockStorage.getItem(BACKUP_KEY)!).metadata.title).toBe('Unsaved In-Memory Work');
+  });
+
+  it('9. recovers valid backup into memory when active localStorage writes fail (quota or read-only)', () => {
+    document.body.innerHTML = `
+      <div id="app">
+        <nav class="sidebar"><div class="completeness-mini"><div class="progress"></div><div class="value"></div></div></nav>
+        <main class="content">
+          <header class="top-bar">
+            <h1 id="view-title">Dashboard</h1>
+            <div id="save-status-container"><span id="save-status">Saved</span></div>
+            <div class="top-actions"></div>
+          </header>
+          <div id="view-container"></div>
+        </main>
+      </div>
+    `;
+
+    const backedUpWorkflow: WorkflowStore = {
+      ...JSON.parse(JSON.stringify(DEMO_STATE)),
+      metadata: {
+        ...DEMO_STATE.metadata,
+        id: 'backup-wf-recover',
+        title: 'Backed Up Workflow B'
+      }
+    };
+    mockStorage.setItem(BACKUP_KEY, JSON.stringify(backedUpWorkflow));
+
+    const app = new App(manager);
+    expect(document.getElementById('restore-backup')).not.toBeNull();
+
+    // Simulate quota failure on all writes (so writing to STORAGE_KEY during Restore Backup fails)
+    mockStorage.throwOnSet = true;
+    window.confirm = () => true;
+    const alerts: string[] = [];
+    window.alert = (msg?: string) => { if (msg) alerts.push(msg); };
+
+    const restored = app.restoreFromBackup();
+    expect(restored).toBe(true);
+
+    // Recovered into memory and clearly marked as unsaved/error
+    expect(app.getStore().metadata.id).toBe('backup-wf-recover');
+    expect(app.getStore().metadata.title).toBe('Backed Up Workflow B');
+    expect(app.getHasUnsavedChanges()).toBe(true);
+    expect(document.getElementById('save-status')?.className).toContain('status-error');
+
+    // Never claims persistent restoration when only memory recovery succeeded
+    expect(alerts[0]).toContain('recovered into memory only');
+    expect(alerts[0]).toContain('UNSAVED');
+
+    // Backup in BACKUP_KEY is preserved intact
+    expect(JSON.parse(mockStorage.getItem(BACKUP_KEY)!).metadata.id).toBe('backup-wf-recover');
+
+    // Permits immediate Export Draft / Recovery JSON
+    const exportedDraft = exportDraftToJSON(app.getStore());
+    expect(JSON.parse(exportedDraft).metadata.workflow_title).toBe('Backed Up Workflow B');
+  });
+
+  it('10. does not modify active storage or backup storage when New Workflow is cancelled', () => {
+    document.body.innerHTML = `
+      <div id="app">
+        <nav class="sidebar"><div class="completeness-mini"><div class="progress"></div><div class="value"></div></div></nav>
+        <main class="content">
+          <header class="top-bar">
+            <h1 id="view-title">Dashboard</h1>
+            <div id="save-status-container"><span id="save-status">Saved</span></div>
+            <div class="top-actions">
+              <button id="new-workflow">New</button>
+            </div>
+          </header>
+          <div id="view-container"></div>
+        </main>
+      </div>
+    `;
+
+    const priorBackup = JSON.stringify({
+      ...DEMO_STATE,
+      metadata: { ...DEMO_STATE.metadata, id: 'prior-backup-A0', title: 'Prior Backup A0' }
+    });
+    const activeWorkflow = JSON.stringify({
+      ...DEMO_STATE,
+      metadata: { ...DEMO_STATE.metadata, id: 'active-wf-A', title: 'Active Workflow A' }
+    });
+
+    mockStorage.setItem(BACKUP_KEY, priorBackup);
+    mockStorage.setItem(STORAGE_KEY, activeWorkflow);
+
+    const app = new App(manager);
+
+    // User clicks New Workflow and cancels confirmation
+    window.confirm = () => false;
+    document.getElementById('new-workflow')?.click();
+
+    expect(app.getStore().metadata.id).toBe('active-wf-A');
+    expect(mockStorage.getItem(STORAGE_KEY)).toBe(activeWorkflow);
+    expect(mockStorage.getItem(BACKUP_KEY)).toBe(priorBackup);
+  });
+
+  it('11. rolls back previous backup on failed New Workflow, failed Import, and failed Demo Copy, and reports rollback failure accurately', () => {
+    document.body.innerHTML = `
+      <div id="app">
+        <nav class="sidebar"><div class="completeness-mini"><div class="progress"></div><div class="value"></div></div></nav>
+        <main class="content">
+          <header class="top-bar">
+            <h1 id="view-title">Dashboard</h1>
+            <div id="save-status-container"><span id="save-status">Saved</span></div>
+            <div class="top-actions">
+              <button id="load-demo">Demo</button>
+              <button id="new-workflow">New</button>
+            </div>
+          </header>
+          <div id="view-container"></div>
+        </main>
+      </div>
+    `;
+
+    const priorBackupA0 = JSON.stringify({
+      ...DEMO_STATE,
+      metadata: { ...DEMO_STATE.metadata, id: 'backup-A0', title: 'Backup A0' }
+    });
+    const activeWorkflowA = JSON.stringify({
+      ...DEMO_STATE,
+      metadata: { ...DEMO_STATE.metadata, id: 'active-A', title: 'Active A' }
+    });
+
+    mockStorage.setItem(BACKUP_KEY, priorBackupA0);
+    mockStorage.setItem(STORAGE_KEY, activeWorkflowA);
+
+    let failActiveSave = false;
+    let failBackupRollback = false;
+    let backupWriteCount = 0;
+
+    const origSetItem = mockStorage.setItem.bind(mockStorage);
+    mockStorage.setItem = (key: string, val: string) => {
+      if (failActiveSave && key === STORAGE_KEY) {
+        const err = new Error('QuotaExceededError: Active key write failed');
+        err.name = 'QuotaExceededError';
+        throw err;
+      }
+      if (key === BACKUP_KEY) {
+        backupWriteCount++;
+        if (failBackupRollback && backupWriteCount >= 2) {
+          throw new Error('QuotaExceededError: Backup rollback failed');
+        }
+      }
+      origSetItem(key, val);
+    };
+
+    const app = new App(manager);
+    window.confirm = () => true;
+    const alerts: string[] = [];
+    window.alert = (msg?: string) => { if (msg) alerts.push(msg); };
+
+    failActiveSave = true;
+
+    // 1. Failed New Workflow restores previous backup A0
+    backupWriteCount = 0;
+    document.getElementById('new-workflow')?.click();
+    expect(JSON.parse(mockStorage.getItem(STORAGE_KEY)!).metadata.id).toBe('active-A');
+    expect(JSON.parse(mockStorage.getItem(BACKUP_KEY)!).metadata.id).toBe('backup-A0');
+
+    // 2. Failed Import restores previous backup A0
+    backupWriteCount = 0;
+    const importCandidate = JSON.stringify({
+      metadata: { workflow_title: 'Imported C', workflow_owner: 'O', purpose: 'P' },
+      steps: []
+    });
+    expect(app.importWorkflowContent(importCandidate)).toBe(false);
+    expect(JSON.parse(mockStorage.getItem(STORAGE_KEY)!).metadata.id).toBe('active-A');
+    expect(JSON.parse(mockStorage.getItem(BACKUP_KEY)!).metadata.id).toBe('backup-A0');
+
+    // 3. Failed Demo Copy restores previous backup A0
+    backupWriteCount = 0;
+    document.getElementById('load-demo')?.click();
+    document.getElementById('save-demo-copy')?.click();
+    expect(JSON.parse(mockStorage.getItem(STORAGE_KEY)!).metadata.id).toBe('active-A');
+    expect(JSON.parse(mockStorage.getItem(BACKUP_KEY)!).metadata.id).toBe('backup-A0');
+
+    // Exit demo back to Active A
+    document.getElementById('exit-demo')?.click();
+
+    // 4. When backup rollback itself fails, preserves the current valid backup (Active A) and reports limitation accurately
+    alerts.length = 0;
+    backupWriteCount = 0;
+    failBackupRollback = true;
+    document.getElementById('new-workflow')?.click();
+
+    expect(JSON.parse(mockStorage.getItem(BACKUP_KEY)!).metadata.id).toBe('active-A');
+    expect(alerts[0]).toContain('Could not roll back to previous backup');
   });
 });

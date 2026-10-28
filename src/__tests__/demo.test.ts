@@ -415,4 +415,86 @@ describe('Demo Mode Isolation & Data Protection', () => {
     expect(app.getHasUnsavedChanges()).toBe(true);
     expect(document.getElementById('save-status')?.textContent).toContain('Unsaved in Memory');
   });
+
+  it('5. preserves preDemoStore, demo mode, demo banner, and visible error status when demo save fails after backup succeeds', () => {
+    const workflowA: WorkflowStore = {
+      metadata: {
+        id: 'wf-A',
+        title: 'Workflow A (Persisted)',
+        version: '1.0.0',
+        created_at: '2026-01-01T00:00:00Z',
+        owner: 'Owner A',
+        organisation: 'Org A',
+        purpose: 'Purpose A',
+        domain: 'education'
+      },
+      steps: [],
+      reflection: { failure_modes: '', essential_judgement: '', over_reliance_risks: '', embedded_assumptions: '' }
+    };
+    customStorage.setItem(STORAGE_KEY, JSON.stringify(workflowA));
+
+    let failActiveStorageWrites = false;
+    const selectiveStorage: Storage = {
+      getItem: (k: string) => localStorageMock.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        if (failActiveStorageWrites && k === STORAGE_KEY) {
+          const err = new Error('QuotaExceededError: Active storage full');
+          err.name = 'QuotaExceededError';
+          throw err;
+        }
+        localStorageMock.set(k, String(v));
+      },
+      removeItem: (k: string) => { localStorageMock.delete(k); },
+      clear: () => { localStorageMock.clear(); },
+      key: (i: number) => Array.from(localStorageMock.keys())[i] ?? null,
+      get length() { return localStorageMock.size; }
+    };
+
+    const storageManager = new StorageManager(selectiveStorage);
+    const app = new App(storageManager);
+
+    // Modify A into B in memory while active storage writes fail so B remains unsaved
+    failActiveStorageWrites = true;
+    app.getStore().metadata.title = 'Workflow B (Unsaved Pre-Demo)';
+    (app as any).saveToStorage();
+    expect(app.getHasUnsavedChanges()).toBe(true);
+
+    const confirmPrompts: string[] = [];
+    window.confirm = (msg?: string) => {
+      if (msg) confirmPrompts.push(msg);
+      return true;
+    };
+    window.alert = () => {};
+
+    // Enter demo mode and edit demo
+    document.getElementById('load-demo')?.click();
+    expect(app.getIsDemoMode()).toBe(true);
+    app.getStore().metadata.title = 'Modified Demo Copy In Memory';
+
+    // Attempt to save demo copy: backup to BACKUP_KEY succeeds, but saveWorkflow to STORAGE_KEY fails!
+    document.getElementById('save-demo-copy')?.click();
+
+    // 1. Explained single-snapshot backup precedence before replacement
+    expect(confirmPrompts.some(m => m.includes('single protective backup slot'))).toBe(true);
+
+    // 2. Demo mode, demo banner, and modified demo copy remain intact in memory
+    expect(app.getIsDemoMode()).toBe(true);
+    expect(document.getElementById('demo-banner')).not.toBeNull();
+    expect(app.getStore().metadata.title).toBe('Modified Demo Copy In Memory');
+
+    // 3. Genuine storage-error status is visible even in demo mode
+    const statusBadge = document.getElementById('save-status')!;
+    expect(statusBadge.className).toContain('status-error');
+    expect(statusBadge.textContent).toContain('Storage Error');
+
+    // 4. Restore button is synchronized and visible on the failure path
+    expect(document.getElementById('restore-backup')).not.toBeNull();
+
+    // 5. Clicking Exit Demo reliably recovers pre-demo snapshot B (with its unsaved status)
+    document.getElementById('exit-demo')?.click();
+    expect(app.getIsDemoMode()).toBe(false);
+    expect(app.getStore().metadata.title).toBe('Workflow B (Unsaved Pre-Demo)');
+    expect(app.getHasUnsavedChanges()).toBe(true);
+    expect(JSON.parse(localStorageMock.get(STORAGE_KEY)!).metadata.title).toBe('Workflow A (Persisted)');
+  });
 });
