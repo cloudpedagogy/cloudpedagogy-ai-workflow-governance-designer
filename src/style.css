@@ -427,13 +427,91 @@ input:focus, textarea:focus, select:focus, button:focus-visible {
   color: var(--text-muted);
 }
 
+/* Save Status Badge */
+.save-status-container {
+  display: flex;
+  align-items: center;
+  margin-right: 16px;
+}
+
+.save-status-badge {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.2s ease;
+}
+
+.status-saved {
+  color: #065F46;
+  background: #ECFDF5;
+  border: 1px solid #A7F3D0;
+}
+
+.status-unsaved {
+  color: #92400E;
+  background: #FFFBEB;
+  border: 1px solid #FDE68A;
+}
+
+.status-demo {
+  color: #3730A3;
+  background: #EEF2FF;
+  border: 1px solid #C7D2FE;
+}
+
+.status-error {
+  color: #991B1B;
+  background: #FEF2F2;
+  border: 1px solid #FECACA;
+}
+
 /* Demo Banner */
 #demo-banner {
   background: #111111 !important;
   color: white !important;
-  padding: 8px 40px !important;
+  padding: 10px 40px !important;
   font-size: var(--font-size-meta) !important;
   font-weight: 500 !important;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.demo-banner-content {
+  flex: 1;
+  min-width: 280px;
+}
+
+.demo-banner-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-primary-light {
+  background: white !important;
+  color: #111111 !important;
+  border: 1px solid white !important;
+}
+
+.btn-primary-light:hover {
+  background: #f0f0f0 !important;
+}
+
+.btn-secondary-light {
+  background: transparent !important;
+  color: white !important;
+  border: 1px solid #666666 !important;
+}
+
+.btn-secondary-light:hover {
+  background: rgba(255, 255, 255, 0.1) !important;
+  border-color: white !important;
 }
 
 /* Print Styles */

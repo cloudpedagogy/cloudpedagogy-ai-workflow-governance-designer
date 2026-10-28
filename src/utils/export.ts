@@ -1,54 +1,26 @@
-import { calculateAIDependency, calculateCompleteness, type WorkflowStore } from '../data/model';
+import type { WorkflowStore } from '../data/model';
+import { mapStoreToSchema } from './schema';
 
-export function mapStoreToSchema(store: WorkflowStore) {
-  return {
-    metadata: {
-      workflow_id: store.metadata.id,
-      workflow_title: store.metadata.title,
-      version: store.metadata.version,
-      created_at: store.metadata.created_at,
-      workflow_owner: store.metadata.owner,
-      organisation: store.metadata.organisation,
-      purpose: store.metadata.purpose,
-      domain: store.metadata.domain,
-      capability_notes: store.metadata.capabilityNotes || '',
-      governance_notes: store.metadata.governanceNotes || ''
-    },
-    steps: store.steps.map(step => ({
-      step_id: step.id,
-      step_name: step.name,
-      step_type: step.type,
-      description: step.description,
-      inputs: step.inputs,
-      outputs: step.outputs,
-      ai_involvement: step.ai_involvement,
-      human_oversight: step.human_oversight,
-      risks: step.risks,
-      controls: step.controls
-    })),
-    reflection: store.reflection,
-    design_time_metrics: {
-      _disclaimer: "These metrics are indicative design-time markers and must be recalculated by downstream authoritative audit tools (e.g. AI Governance Risk Scanner).",
-      completeness_score: calculateCompleteness(store),
-      ai_dependency_score: calculateAIDependency(store)
-    }
-  };
-}
+export { mapStoreToSchema };
 
 export function exportToJSON(store: WorkflowStore) {
-  // Validation
+  // Validation against required schema fields
   const required = ['title', 'owner', 'purpose'];
   const missing = required.filter(f => !store.metadata[f as keyof typeof store.metadata]);
-  
+
   if (missing.length > 0) {
-    alert(`Critical Schema Failure: Missing required fields: ${missing.join(', ')}. Please complete these before exporting.`);
+    alert(
+      `Critical Schema Failure: Missing required fields: ${missing.join(', ')}. Please complete these before exporting.`
+    );
     return;
   }
 
   const schemaCompliant = mapStoreToSchema(store);
   const dataStr = JSON.stringify(schemaCompliant, null, 2);
   const dataUri = 'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr);
-  const exportFileDefaultName = `workflow-${store.metadata.title.toLowerCase().replace(/\s+/g, '-') || 'untitled'}.json`;
+  const rawTitle = store.metadata.title || 'untitled';
+  const cleanTitle = rawTitle.toLowerCase().replace(/[^a-z0-9_-]+/g, '-') || 'untitled';
+  const exportFileDefaultName = `workflow-${cleanTitle}.json`;
 
   const linkElement = document.createElement('a');
   linkElement.setAttribute('href', dataUri);
@@ -59,36 +31,36 @@ export function exportToJSON(store: WorkflowStore) {
 export function generateMarkdown(store: WorkflowStore): string {
   let md = `# AI Workflow Governance Specification\n\n`;
   md += `## 1. Workflow Metadata\n`;
-  md += `- **Title**: ${store.metadata.title}\n`;
-  md += `- **Owner**: ${store.metadata.owner}\n`;
-  md += `- **Organisation**: ${store.metadata.organisation}\n`;
-  md += `- **Purpose**: ${store.metadata.purpose}\n`;
-  md += `- **Domain**: ${store.metadata.domain}\n`;
-  md += `- **Version**: ${store.metadata.version}\n`;
-  md += `- **Created At**: ${store.metadata.created_at}\n`;
+  md += `- **Title**: ${store.metadata.title || 'Untitled'}\n`;
+  md += `- **Owner**: ${store.metadata.owner || 'Not specified'}\n`;
+  md += `- **Organisation**: ${store.metadata.organisation || 'Not specified'}\n`;
+  md += `- **Purpose**: ${store.metadata.purpose || 'Not specified'}\n`;
+  md += `- **Domain**: ${store.metadata.domain || 'Not specified'}\n`;
+  md += `- **Version**: ${store.metadata.version || '1.0.0'}\n`;
+  md += `- **Created At**: ${store.metadata.created_at || 'Not specified'}\n`;
   if (store.metadata.capabilityNotes) md += `- **AI Capability Notes**: ${store.metadata.capabilityNotes}\n`;
   if (store.metadata.governanceNotes) md += `- **AI Governance Notes**: ${store.metadata.governanceNotes}\n`;
   md += `\n`;
 
   md += `## 2. Workflow Steps\n\n`;
   store.steps.forEach((step, index) => {
-    md += `### Step ${index + 1}: ${step.name}\n`;
+    md += `### Step ${index + 1}: ${step.name || 'Untitled Step'}\n`;
     md += `- **Type**: ${step.type}\n`;
-    md += `- **Description**: ${step.description}\n`;
-    md += `- **Inputs**: ${step.inputs.join(', ')}\n`;
-    md += `- **Outputs**: ${step.outputs.join(', ')}\n\n`;
-    
+    md += `- **Description**: ${step.description || 'N/A'}\n`;
+    md += `- **Inputs**: ${(step.inputs && step.inputs.length > 0) ? step.inputs.join(', ') : 'None'}\n`;
+    md += `- **Outputs**: ${(step.outputs && step.outputs.length > 0) ? step.outputs.join(', ') : 'None'}\n\n`;
+
     md += `#### Human-AI Boundary\n`;
-    md += `- **Responsible Role**: ${step.human_oversight.responsible_role}\n`;
-    md += `- **Oversight Level**: ${step.human_oversight.oversight_level}\n`;
-    md += `- **Intervention Points**: ${step.human_oversight.intervention_points}\n\n`;
+    md += `- **Responsible Role**: ${step.human_oversight?.responsible_role || 'Not specified'}\n`;
+    md += `- **Oversight Level**: ${step.human_oversight?.oversight_level || 'none'}\n`;
+    md += `- **Intervention Points**: ${step.human_oversight?.intervention_points || 'None'}\n\n`;
 
     md += `#### Risk & Controls\n`;
-    md += `- **Bias Risk**: ${step.risks.bias_risk || 'None identified'}\n`;
-    md += `- **Operational Risk**: ${step.risks.operational_risk || 'None identified'}\n`;
-    md += `- **Mitigation**: ${step.risks.mitigation || 'N/A'}\n`;
+    md += `- **Bias Risk**: ${step.risks?.bias_risk || 'None identified'}\n`;
+    md += `- **Operational Risk**: ${step.risks?.operational_risk || 'None identified'}\n`;
+    md += `- **Mitigation**: ${step.risks?.mitigation || 'N/A'}\n`;
     if (step.type === 'decision-point') {
-      md += `- **Decision Record Required**: ${step.controls.approval_required ? 'YES' : 'No'}\n`;
+      md += `- **Decision Record Required**: ${step.controls?.approval_required ? 'YES' : 'No'}\n`;
     }
     md += `\n`;
 
@@ -96,10 +68,10 @@ export function generateMarkdown(store: WorkflowStore): string {
   });
 
   md += `## 3. Critical Reflection\n`;
-  md += `### Failure Modes\n${store.reflection.failure_modes}\n\n`;
-  md += `### Essential Human Judgement\n${store.reflection.essential_judgement}\n\n`;
-  md += `### AI Over-reliance Risks\n${store.reflection.over_reliance_risks}\n\n`;
-  md += `### Embedded Assumptions\n${store.reflection.embedded_assumptions}\n\n`;
+  md += `### Failure Modes\n${store.reflection?.failure_modes || 'None documented'}\n\n`;
+  md += `### Essential Human Judgement\n${store.reflection?.essential_judgement || 'None documented'}\n\n`;
+  md += `### AI Over-reliance Risks\n${store.reflection?.over_reliance_risks || 'None documented'}\n\n`;
+  md += `### Embedded Assumptions\n${store.reflection?.embedded_assumptions || 'None documented'}\n\n`;
 
   return md;
 }
@@ -107,7 +79,9 @@ export function generateMarkdown(store: WorkflowStore): string {
 export function exportToMarkdown(store: WorkflowStore) {
   const md = generateMarkdown(store);
   const dataUri = 'data:text/markdown;charset=utf-8,' + encodeURIComponent(md);
-  const filename = `workflow-${store.metadata.title.toLowerCase().replace(/\s+/g, '-') || 'untitled'}.md`;
+  const rawTitle = store.metadata.title || 'untitled';
+  const cleanTitle = rawTitle.toLowerCase().replace(/[^a-z0-9_-]+/g, '-') || 'untitled';
+  const filename = `workflow-${cleanTitle}.md`;
 
   const linkElement = document.createElement('a');
   linkElement.setAttribute('href', dataUri);

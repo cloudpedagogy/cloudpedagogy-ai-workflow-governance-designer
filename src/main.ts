@@ -1,44 +1,187 @@
 import './style.css';
-import { 
-  INITIAL_STATE, 
-  calculateCompleteness, 
-  calculateAIDependency, 
-  getHumanOversightIndicator, 
+import {
+  INITIAL_STATE,
+  calculateCompleteness,
+  calculateAIDependency,
+  getHumanOversightIndicator,
   DEMO_STATE,
   getGovernanceSuggestions,
   detectOversightGaps,
   detectConsecutiveAISteps,
-  isHighRiskStep
+  isHighRiskStep,
+  type WorkflowStore,
+  type WorkflowStep
 } from './data/model';
-import type { WorkflowStore } from './data/model';
 import { exportToJSON, exportToMarkdown, exportToPDF } from './utils/export';
 import { generateUUID } from './utils/uuid';
+import { escapeHtml, escapeAttr } from './utils/security';
+import { validateWorkflowImport } from './utils/schema';
+import { StorageManager } from './utils/storage';
 
-class App {
+export class App {
   private store: WorkflowStore = INITIAL_STATE;
   private currentView: string = 'dashboard';
+  private storageManager: StorageManager;
+  private isDemoMode: boolean = false;
+  private hasUnsavedChanges: boolean = false;
 
-  constructor() {
+  constructor(storageManager?: StorageManager) {
+    this.storageManager = storageManager || new StorageManager();
     this.loadFromStorage();
     this.initEventListeners();
     this.render();
   }
 
+  public getStore(): WorkflowStore {
+    return this.store;
+  }
+
+  public getIsDemoMode(): boolean {
+    return this.isDemoMode;
+  }
+
   private loadFromStorage() {
-    const saved = localStorage.getItem('cp_workflow_designer');
-    if (saved) {
-      try {
-        this.store = JSON.parse(saved);
-      } catch (e) {
-        console.error('Failed to load saved workflow:', e);
+    const result = this.storageManager.loadWorkflow();
+    this.store = result.data;
+    if (result.success) {
+      this.hasUnsavedChanges = false;
+      this.updateSaveStatus('saved');
+    } else {
+      if (result.rawCorrupted) {
+        this.updateSaveStatus('error', 'Saved workflow corrupted. A new workflow has been initialized.');
+        console.warn('Storage load corrupted:', result.error);
+      } else {
+        this.updateSaveStatus('error', result.error);
       }
     }
   }
 
-  private saveToStorage() {
-    localStorage.setItem('cp_workflow_designer', JSON.stringify(this.store));
+  private saveToStorage(isExplicitUserSave: boolean = false): boolean {
+    if (this.isDemoMode) {
+      this.hasUnsavedChanges = true;
+      this.updateCompletenessUI();
+      this.updateSaveStatus('demo');
+      return true;
+    }
+
+    const result = this.storageManager.saveWorkflow(this.store);
     this.updateCompletenessUI();
+
+    if (result.success) {
+      this.hasUnsavedChanges = false;
+      this.updateSaveStatus('saved');
+      return true;
+    } else {
+      this.hasUnsavedChanges = true;
+      this.updateSaveStatus('error', result.error);
+      if (isExplicitUserSave) {
+        alert(
+          `${result.error}\n\nRecovery Guidance: Click "Export JSON" from the top bar or Export tab to save your workflow safely.`
+        );
+      }
+      return false;
+    }
+  }
+
+  private updateSaveStatus(status: 'saved' | 'unsaved' | 'demo' | 'error', customMsg?: string) {
+    const el = document.getElementById('save-status');
+    if (!el) return;
+
+    el.className = 'save-status-badge';
+
+    if (this.isDemoMode) {
+      el.classList.add('status-demo');
+      el.textContent = 'Demo Mode (In-Memory Only)';
+      el.title = 'Changes exist in memory only and will not overwrite your saved workflow.';
+      return;
+    }
+
+    switch (status) {
+      case 'saved':
+        el.classList.add('status-saved');
+        el.textContent = '✓ Saved';
+        el.title = 'All changes saved to local storage.';
+        break;
+      case 'unsaved':
+        el.classList.add('status-unsaved');
+        el.textContent = '● Unsaved changes';
+        el.title = 'You have unsaved changes in memory.';
+        break;
+      case 'demo':
+        el.classList.add('status-demo');
+        el.textContent = 'Demo Mode (In-Memory Only)';
+        el.title = 'Changes exist in memory only and will not overwrite your saved workflow.';
+        break;
+      case 'error':
+        el.classList.add('status-error');
+        el.textContent = '⚠️ Storage Error (Export JSON recommended)';
+        el.title = customMsg || 'Storage failure. Export JSON to save your workflow.';
+        break;
+    }
+  }
+
+  private showDemoBanner() {
+    let banner = document.getElementById('demo-banner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'demo-banner';
+      banner.setAttribute('role', 'status');
+      banner.setAttribute('aria-live', 'polite');
+      banner.innerHTML = `
+        <div class="demo-banner-content">
+          <strong>Demo Example (In-Memory Only):</strong> You are exploring pre-filled workflow data. Your saved workflows are not overwritten.
+        </div>
+        <div class="demo-banner-actions">
+          <button id="save-demo-copy" class="btn btn-sm btn-primary-light" aria-label="Save copy as your own workflow">Save Copy as My Workflow</button>
+          <button id="exit-demo" class="btn btn-sm btn-secondary-light" aria-label="Exit demo mode and return to your saved workflow">Exit Demo</button>
+        </div>
+      `;
+      document.querySelector('.content')?.prepend(banner);
+
+      document.getElementById('save-demo-copy')?.addEventListener('click', () => {
+        this.saveDemoAsMyWorkflow();
+      });
+
+      document.getElementById('exit-demo')?.addEventListener('click', () => {
+        this.exitDemoMode();
+      });
+    }
+  }
+
+  private hideDemoBanner() {
+    document.getElementById('demo-banner')?.remove();
+  }
+
+  private saveDemoAsMyWorkflow() {
+    // Generate fresh workflow ID so it's saved as the user's own workflow
+    this.store.metadata.id = generateUUID();
+    this.store.metadata.created_at = new Date().toISOString();
+    this.isDemoMode = false;
     this.hideDemoBanner();
+
+    const saveResult = this.storageManager.saveWorkflow(this.store);
+    this.render();
+
+    if (saveResult.success) {
+      this.hasUnsavedChanges = false;
+      this.updateSaveStatus('saved');
+      alert(`Workflow "${this.store.metadata.title}" saved as your own workflow.`);
+    } else {
+      this.updateSaveStatus('error', saveResult.error);
+      alert(`Workflow copied to memory, but failed to write to local storage:\n${saveResult.error}\n\nPlease export as JSON.`);
+    }
+  }
+
+  private exitDemoMode() {
+    if (this.hasUnsavedChanges) {
+      if (!confirm('Exit demo mode? Any in-memory demo edits will be discarded, and your previously saved workflow will be restored.')) {
+        return;
+      }
+    }
+    this.isDemoMode = false;
+    this.hideDemoBanner();
+    this.loadFromStorage();
+    this.render();
   }
 
   private initEventListeners() {
@@ -55,8 +198,17 @@ class App {
 
     // Top Actions
     document.getElementById('save-workflow')?.addEventListener('click', () => {
-      this.saveToStorage();
-      alert('Workflow saved locally.');
+      if (this.isDemoMode) {
+        if (confirm('You are in Demo Mode. Would you like to save this demo as your own workflow?')) {
+          this.saveDemoAsMyWorkflow();
+        }
+        return;
+      }
+
+      const success = this.saveToStorage(true);
+      if (success) {
+        alert('Workflow saved locally.');
+      }
     });
 
     document.getElementById('import-workflow')?.addEventListener('click', () => {
@@ -64,36 +216,44 @@ class App {
     });
 
     document.getElementById('load-demo')?.addEventListener('click', () => {
-      if (confirm('Load healthcare demo? This will show you a pre-filled example. Your saved work will NOT be overwritten unless you click "Save Local".')) {
-        this.store = JSON.parse(JSON.stringify(DEMO_STATE)); // Deep clone
+      if (
+        confirm(
+          'Load healthcare demo? This will load a pre-filled example in memory. Your saved work will NOT be overwritten unless you click "Save Copy as My Workflow".'
+        )
+      ) {
+        this.store = JSON.parse(JSON.stringify(DEMO_STATE));
+        this.isDemoMode = true;
+        this.hasUnsavedChanges = false;
         this.render();
         this.showDemoBanner();
+        this.updateSaveStatus('demo');
       }
     });
 
     document.getElementById('new-workflow')?.addEventListener('click', () => {
-      if (confirm('Clear all data and start a new workflow? This will overwrite your current saved work.')) {
+      // Protective backup before clearing
+      const backupResult = this.storageManager.createProtectiveBackup();
+      if (!backupResult.success) {
+        alert(
+          `Cannot create new workflow: Protective backup failed (${backupResult.error}).\n\nPlease export your current workflow as JSON first to prevent data loss.`
+        );
+        return;
+      }
+
+      if (
+        confirm(
+          'Clear all data and start a new workflow? A protective backup of your previous workflow has been saved.'
+        )
+      ) {
         this.store = JSON.parse(JSON.stringify(INITIAL_STATE));
-        this.store.metadata.id = generateUUID(); // Fresh ID
-        this.saveToStorage();
-        this.render();
+        this.store.metadata.id = generateUUID();
+        this.store.metadata.created_at = new Date().toISOString();
+        this.isDemoMode = false;
         this.hideDemoBanner();
+        this.saveToStorage(true);
+        this.render();
       }
     });
-  }
-
-  private showDemoBanner() {
-    let banner = document.getElementById('demo-banner');
-    if (!banner) {
-      banner = document.createElement('div');
-      banner.id = 'demo-banner';
-      banner.innerHTML = 'Viewing Demo Example. <span>Changes are temporary. To save this as your own, click "Save Local". To discard, refresh the page or click "New Workflow".</span>';
-      document.querySelector('.content')?.prepend(banner);
-    }
-  }
-
-  private hideDemoBanner() {
-    document.getElementById('demo-banner')?.remove();
   }
 
   private switchView(view: string) {
@@ -101,9 +261,9 @@ class App {
     document.querySelectorAll('.nav-item').forEach(btn => {
       btn.classList.toggle('active', (btn as HTMLButtonElement).dataset.view === view);
     });
-    
+
     const titleMap: Record<string, string> = {
-      'dashboard': 'Dashboard',
+      dashboard: 'Dashboard',
       'workflow-context': 'Workflow Context',
       'workflow-builder': 'Step Builder',
       'governance-panel': 'Governance Controls',
@@ -121,7 +281,7 @@ class App {
     const completeness = calculateCompleteness(this.store);
     const progressEl = document.querySelector('.progress') as HTMLElement;
     const valueEl = document.querySelector('.completeness-mini .value') as HTMLElement;
-    
+
     if (progressEl) progressEl.style.width = `${completeness}%`;
     if (valueEl) valueEl.textContent = `${completeness}%`;
   }
@@ -162,7 +322,10 @@ class App {
   private renderDashboard() {
     const completeness = calculateCompleteness(this.store);
     const dependency = calculateAIDependency(this.store);
-    
+    const suggestions = getGovernanceSuggestions(this.store);
+    const consecutiveClusters = detectConsecutiveAISteps(this.store);
+    const gaps = detectOversightGaps(this.store);
+
     return `
       <div class="dash-grid">
         <div class="metric-card">
@@ -188,7 +351,7 @@ class App {
             <span class="metric-title">Workflow Steps</span>
           </div>
           <div class="metric-value">${this.store.steps.length}</div>
-          <p class="metric-title">${this.store.metadata.title || 'Untitled Workflow'}</p>
+          <p class="metric-title">${escapeHtml(this.store.metadata.title) || 'Untitled Workflow'}</p>
         </div>
 
         <div class="metric-card">
@@ -206,25 +369,25 @@ class App {
           <div class="insight-group">
             <h3 style="font-size: 14px; margin-bottom: 12px; color: var(--text-primary)">Design-Time Suggestions</h3>
             <ul style="list-style: none; padding: 0; margin: 0; font-size: 13px">
-              ${getGovernanceSuggestions(this.store).map(s => `
+              ${suggestions.length > 0 ? suggestions.map(s => `
                 <li style="padding: 10px; background: ${s.type === 'warning' ? '#FFFBEB' : '#F0F9FF'}; border-left: 3px solid ${s.type === 'warning' ? '#F59E0B' : '#0EA5E9'}; margin-bottom: 8px; border-radius: 4px; color: ${s.type === 'warning' ? '#92400E' : '#0369A1'}">
-                  <strong>${s.type.toUpperCase()}:</strong> ${s.message}
+                  <strong>${escapeHtml(s.type.toUpperCase())}:</strong> ${escapeHtml(s.message)}
                 </li>
-              `).join('') || '<li style="color: var(--text-muted); font-style: italic">No immediate suggestions.</li>'}
+              `).join('') : '<li style="color: var(--text-muted); font-style: italic">No immediate suggestions.</li>'}
             </ul>
           </div>
           <div class="insight-group">
             <h3 style="font-size: 14px; margin-bottom: 12px; color: var(--text-primary)">Workflow Pattern Analysis</h3>
             <div class="pattern-item" style="font-size: 13px; margin-bottom: 16px">
               <span style="display: block; font-weight: 600; margin-bottom: 4px">Consecutive AI Steps:</span>
-              <span style="color: ${detectConsecutiveAISteps(this.store).length > 0 ? '#B91C1C' : '#059669'}">
-                ${detectConsecutiveAISteps(this.store).length > 0 ? `Detected ${detectConsecutiveAISteps(this.store).length} sequences of consecutive AI reliance.` : 'No excessive AI reliance clusters detected.'}
+              <span style="color: ${consecutiveClusters.length > 0 ? '#B91C1C' : '#059669'}">
+                ${consecutiveClusters.length > 0 ? `Detected ${consecutiveClusters.length} sequence(s) of consecutive AI reliance.` : 'No excessive AI reliance clusters detected.'}
               </span>
             </div>
             <div class="pattern-item" style="font-size: 13px">
               <span style="display: block; font-weight: 600; margin-bottom: 4px">Oversight Completeness:</span>
-              <span style="color: ${detectOversightGaps(this.store).length > 0 ? '#B91C1C' : '#059669'}">
-                ${detectOversightGaps(this.store).length > 0 ? `Found ${detectOversightGaps(this.store).length} AI steps with zero human oversight.` : 'All AI steps have defined oversight levels.'}
+              <span style="color: ${gaps.length > 0 ? '#B91C1C' : '#059669'}">
+                ${gaps.length > 0 ? `Found ${gaps.length} AI steps with zero human oversight.` : 'All AI steps have defined oversight levels.'}
               </span>
             </div>
           </div>
@@ -253,29 +416,29 @@ class App {
         <form id="context-form">
           <div class="form-group">
             <label for="title">Workflow Title</label>
-            <input type="text" id="title" value="${metadata.title}" placeholder="e.g. Automated Student Feedback Loop">
+            <input type="text" id="title" aria-label="Workflow Title" value="${escapeAttr(metadata.title)}" placeholder="e.g. Automated Student Feedback Loop">
           </div>
           
           <div class="grid-2">
             <div class="form-group">
               <label for="owner">Workflow Owner</label>
-              <input type="text" id="owner" value="${metadata.owner}" placeholder="e.g. Head of AI Governance">
+              <input type="text" id="owner" aria-label="Workflow Owner" value="${escapeAttr(metadata.owner)}" placeholder="e.g. Head of AI Governance">
             </div>
             <div class="form-group">
               <label for="organisation">Organisation</label>
-              <input type="text" id="organisation" value="${metadata.organisation}" placeholder="e.g. Global Health Initiative">
+              <input type="text" id="organisation" aria-label="Organisation" value="${escapeAttr(metadata.organisation)}" placeholder="e.g. Global Health Initiative">
             </div>
           </div>
 
           <div class="form-group">
             <label for="purpose">Primary Purpose</label>
-            <textarea id="purpose" rows="3" placeholder="Describe what this workflow achieves...">${metadata.purpose}</textarea>
+            <textarea id="purpose" aria-label="Primary Purpose" rows="3" placeholder="Describe what this workflow achieves...">${escapeHtml(metadata.purpose)}</textarea>
           </div>
 
           <div class="grid-2">
             <div class="form-group">
               <label for="domain">Domain</label>
-              <select id="domain">
+              <select id="domain" aria-label="Domain">
                 <option value="education" ${metadata.domain === 'education' ? 'selected' : ''}>Education</option>
                 <option value="research" ${metadata.domain === 'research' ? 'selected' : ''}>Research</option>
                 <option value="policy" ${metadata.domain === 'policy' ? 'selected' : ''}>Policy</option>
@@ -284,25 +447,23 @@ class App {
             </div>
             <div class="form-group">
               <label for="version">Version</label>
-              <input type="text" id="version" value="${metadata.version}">
+              <input type="text" id="version" aria-label="Version" value="${escapeAttr(metadata.version)}">
             </div>
           </div>
         </form>
 
-        <!-- Lightweight capability and governance layer -->
-        <!-- Optional, non-blocking, and does not alter core workflow -->
         <details class="section" style="margin-top: 32px; border: 1px solid var(--border-color); border-radius: 8px; padding: 0;">
           <summary style="padding: 16px; cursor: pointer; font-weight: 600; font-size: 14px; color: var(--text-secondary);">
             Capability & Governance Notes (Optional)
           </summary>
           <div style="padding: 16px; border-top: 1px solid var(--border-color); background: #fafafa;">
             <div class="form-group">
-              <label style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted);">AI Capability Notes</label>
-              <textarea id="capabilityNotes" rows="2" style="font-size: 13px; font-family: inherit;" placeholder="How does this workflow develop AI capability?">${metadata.capabilityNotes || ''}</textarea>
+              <label for="capabilityNotes" style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted);">AI Capability Notes</label>
+              <textarea id="capabilityNotes" aria-label="AI Capability Notes" rows="2" style="font-size: 13px; font-family: inherit;" placeholder="How does this workflow develop AI capability?">${escapeHtml(metadata.capabilityNotes || '')}</textarea>
             </div>
             <div class="form-group" style="margin-bottom: 0;">
-              <label style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted);">AI Governance Notes</label>
-              <textarea id="governanceNotes" rows="2" style="font-size: 13px; font-family: inherit;" placeholder="Key governance considerations for this workflow...">${metadata.governanceNotes || ''}</textarea>
+              <label for="governanceNotes" style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted);">AI Governance Notes</label>
+              <textarea id="governanceNotes" aria-label="AI Governance Notes" rows="2" style="font-size: 13px; font-family: inherit;" placeholder="Key governance considerations for this workflow...">${escapeHtml(metadata.governanceNotes || '')}</textarea>
             </div>
           </div>
         </details>
@@ -336,7 +497,7 @@ class App {
     return `
       <div class="section-actions" style="margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center">
         <p style="color: var(--text-secondary)">Define the sequence of human and AI actions in this workflow.</p>
-        <button id="add-step" class="btn btn-primary">+ Add New Step</button>
+        <button id="add-step" class="btn btn-primary" aria-label="Add new workflow step">+ Add New Step</button>
       </div>
       
       <div id="steps-list">
@@ -356,7 +517,7 @@ class App {
     `;
   }
 
-  private renderStepItem(step: any, index: number, isHighRisk: boolean = false, hasGaps: boolean = false) {
+  private renderStepItem(step: WorkflowStep, index: number, isHighRisk: boolean = false, hasGaps: boolean = false) {
     const types: Record<string, string> = {
       'human-only': 'Human Only',
       'ai-supported': 'AI Supported',
@@ -365,30 +526,30 @@ class App {
     };
 
     return `
-      <div class="step-item" data-id="${step.id}">
+      <div class="step-item" data-id="${escapeAttr(step.id)}">
         <div class="step-header">
           <div style="display: flex; align-items: center; gap: 16px">
             <span class="step-number" style="font-weight: 700; color: var(--text-muted)">${index + 1}</span>
-            <span style="font-weight: 600">${step.name || 'Untitled Step'}</span>
-            <span class="step-type-pill">${types[step.type]}</span>
+            <span style="font-weight: 600">${escapeHtml(step.name || 'Untitled Step')}</span>
+            <span class="step-type-pill">${escapeHtml(types[step.type] || step.type)}</span>
             ${isHighRisk ? '<span class="step-type-pill" style="background: #FEE2E2; color: #991B1B; border: 1px solid #FECACA">⚠️ High Risk</span>' : ''}
             ${step.human_oversight.intervention_points ? '<span class="step-type-pill" style="background: #E0F2FE; color: #075985; border: 1px solid #BAE6FD">🔗 Intervention Pt</span>' : ''}
             ${hasGaps ? '<span class="step-type-pill" style="background: #FFFBEB; color: #92400E; border: 1px solid #FDE68A">❗ Missing Oversight</span>' : ''}
           </div>
           <div style="display: flex; gap: 8px">
-            <button class="btn btn-secondary btn-sm edit-step">Edit</button>
-            <button class="btn btn-secondary btn-sm delete-step">Delete</button>
+            <button class="btn btn-secondary btn-sm edit-step" aria-label="Edit step ${index + 1}: ${escapeAttr(step.name || 'Untitled')}">Edit</button>
+            <button class="btn btn-secondary btn-sm delete-step" aria-label="Delete step ${index + 1}: ${escapeAttr(step.name || 'Untitled')}">Delete</button>
           </div>
         </div>
         <div class="step-content">
           <div class="grid-2">
             <div class="form-group">
               <label>Step Name</label>
-              <input type="text" class="step-input" data-field="name" value="${step.name}">
+              <input type="text" class="step-input" data-field="name" aria-label="Step Name" value="${escapeAttr(step.name)}">
             </div>
             <div class="form-group">
               <label>Step Type</label>
-              <select class="step-input" data-field="type">
+              <select class="step-input" data-field="type" aria-label="Step Type">
                 <option value="human-only" ${step.type === 'human-only' ? 'selected' : ''}>Human Only</option>
                 <option value="ai-supported" ${step.type === 'ai-supported' ? 'selected' : ''}>AI Supported</option>
                 <option value="ai-generated" ${step.type === 'ai-generated' ? 'selected' : ''}>AI Generated</option>
@@ -399,17 +560,17 @@ class App {
           
           <div class="form-group">
             <label>Description</label>
-            <textarea class="step-input" data-field="description" rows="2">${step.description}</textarea>
+            <textarea class="step-input" data-field="description" aria-label="Description" rows="2">${escapeHtml(step.description)}</textarea>
           </div>
 
           <div class="grid-2">
             <div class="form-group">
               <label>Inputs</label>
-              <input type="text" class="step-input" data-field="inputs" value="${step.inputs.join(', ')}" placeholder="Comma separated...">
+              <input type="text" class="step-input" data-field="inputs" aria-label="Inputs" value="${escapeAttr(step.inputs.join(', '))}" placeholder="Comma separated...">
             </div>
             <div class="form-group">
               <label>Outputs</label>
-              <input type="text" class="step-input" data-field="outputs" value="${step.outputs.join(', ')}" placeholder="Comma separated...">
+              <input type="text" class="step-input" data-field="outputs" aria-label="Outputs" value="${escapeAttr(step.outputs.join(', '))}" placeholder="Comma separated...">
             </div>
           </div>
 
@@ -418,11 +579,11 @@ class App {
             <div class="grid-2">
               <div class="form-group">
                 <label>Responsible Role</label>
-                <input type="text" class="step-input-nested" data-parent="human_oversight" data-field="responsible_role" value="${step.human_oversight.responsible_role}" placeholder="e.g. Lead Researcher">
+                <input type="text" class="step-input-nested" data-parent="human_oversight" data-field="responsible_role" aria-label="Responsible Role" value="${escapeAttr(step.human_oversight.responsible_role)}" placeholder="e.g. Lead Researcher">
               </div>
               <div class="form-group">
                 <label>Oversight Level</label>
-                <select class="step-input-nested" data-parent="human_oversight" data-field="oversight_level">
+                <select class="step-input-nested" data-parent="human_oversight" data-field="oversight_level" aria-label="Oversight Level">
                   <option value="none" ${step.human_oversight.oversight_level === 'none' ? 'selected' : ''}>None</option>
                   <option value="minimal" ${step.human_oversight.oversight_level === 'minimal' ? 'selected' : ''}>Minimal (Outcome only)</option>
                   <option value="active" ${step.human_oversight.oversight_level === 'active' ? 'selected' : ''}>Active (Process review)</option>
@@ -432,7 +593,7 @@ class App {
             </div>
             <div class="form-group">
               <label>Intervention Points</label>
-              <input type="text" class="step-input-nested" data-parent="human_oversight" data-field="intervention_points" value="${step.human_oversight.intervention_points}" placeholder="Where can a human override?">
+              <input type="text" class="step-input-nested" data-parent="human_oversight" data-field="intervention_points" aria-label="Intervention Points" value="${escapeAttr(step.human_oversight.intervention_points)}" placeholder="Where can a human override?">
             </div>
           </div>
 
@@ -441,16 +602,16 @@ class App {
             <div class="grid-2">
               <div class="form-group">
                 <label>Bias / Fairness Risk</label>
-                <input type="text" class="step-input-nested" data-parent="risks" data-field="bias_risk" value="${step.risks.bias_risk}">
+                <input type="text" class="step-input-nested" data-parent="risks" data-field="bias_risk" aria-label="Bias / Fairness Risk" value="${escapeAttr(step.risks.bias_risk)}">
               </div>
               <div class="form-group">
                 <label>Operational Risk</label>
-                <input type="text" class="step-input-nested" data-parent="risks" data-field="operational_risk" value="${step.risks.operational_risk}">
+                <input type="text" class="step-input-nested" data-parent="risks" data-field="operational_risk" aria-label="Operational Risk" value="${escapeAttr(step.risks.operational_risk)}">
               </div>
             </div>
              <div class="form-group">
               <label>Mitigation Strategy</label>
-              <textarea class="step-input-nested" data-parent="risks" data-field="mitigation" rows="2">${step.risks.mitigation}</textarea>
+              <textarea class="step-input-nested" data-parent="risks" data-field="mitigation" aria-label="Mitigation Strategy" rows="2">${escapeHtml(step.risks.mitigation)}</textarea>
             </div>
           </div>
 
@@ -459,7 +620,7 @@ class App {
               <h4>Decision Point Controls</h4>
               <div class="form-group">
                 <label style="display: flex; align-items: center; gap: 8px; cursor: pointer">
-                  <input type="checkbox" class="step-checkbox-nested" data-parent="controls" data-field="approval_required" ${step.controls.approval_required ? 'checked' : ''} style="width: auto">
+                  <input type="checkbox" class="step-checkbox-nested" data-parent="controls" data-field="approval_required" aria-label="Decision Record Required" ${step.controls.approval_required ? 'checked' : ''} style="width: auto">
                   Decision Record Required (Human-AI Decision Record Tool)
                 </label>
               </div>
@@ -472,7 +633,7 @@ class App {
 
   private attachStepEvents() {
     document.getElementById('add-step')?.addEventListener('click', () => {
-      const newStep: any = {
+      const newStep: WorkflowStep = {
         id: generateUUID(),
         name: '',
         type: 'human-only',
@@ -513,10 +674,10 @@ class App {
         const id = target.closest('.step-item')?.getAttribute('data-id');
         const field = target.dataset.field as any;
         const step = this.store.steps.find(s => s.id === id);
-        
+
         if (step) {
           if (field === 'inputs' || field === 'outputs') {
-            (step as any)[field] = target.value.split(',').map(s => s.trim());
+            (step as any)[field] = target.value.split(',').map(s => s.trim()).filter(Boolean);
           } else {
             (step as any)[field] = target.value;
           }
@@ -532,7 +693,7 @@ class App {
         const parent = target.dataset.parent as any;
         const field = target.dataset.field as any;
         const step = this.store.steps.find(s => s.id === id);
-        
+
         if (step && (step as any)[parent]) {
           (step as any)[parent][field] = target.value;
           this.saveToStorage();
@@ -547,7 +708,7 @@ class App {
         const parent = target.dataset.parent as any;
         const field = target.dataset.field as any;
         const step = this.store.steps.find(s => s.id === id);
-        
+
         if (step && (step as any)[parent]) {
           (step as any)[parent][field] = target.checked;
           this.saveToStorage();
@@ -566,26 +727,26 @@ class App {
           ${this.store.steps.map(step => `
             <div class="step-item">
               <div class="step-header">
-                <span style="font-weight: 600">${step.name || 'Untitled Step'}</span>
-                <span class="step-type-pill">${step.type}</span>
+                <span style="font-weight: 600">${escapeHtml(step.name || 'Untitled Step')}</span>
+                <span class="step-type-pill">${escapeHtml(step.type)}</span>
               </div>
               <div class="step-content expanded" style="border-top: 1px solid var(--border-color)">
                 <div class="grid-2">
                   <div class="form-group">
                     <label>Approval Required</label>
-                    <select class="gov-input" data-id="${step.id}" data-field="approval_required">
+                    <select class="gov-input" data-id="${escapeAttr(step.id)}" data-field="approval_required" aria-label="Approval Required">
                       <option value="false" ${!step.controls.approval_required ? 'selected' : ''}>No</option>
                       <option value="true" ${step.controls.approval_required ? 'selected' : ''}>Yes</option>
                     </select>
                   </div>
                   <div class="form-group">
                     <label>Review Cycle</label>
-                    <input type="text" class="gov-input" data-id="${step.id}" data-field="review_cycle" value="${step.controls.review_cycle}" placeholder="e.g. Quarterly">
+                    <input type="text" class="gov-input" data-id="${escapeAttr(step.id)}" data-field="review_cycle" aria-label="Review Cycle" value="${escapeAttr(step.controls.review_cycle)}" placeholder="e.g. Quarterly">
                   </div>
                 </div>
                 <div class="form-group">
                   <label>Escalation Path</label>
-                  <input type="text" class="gov-input" data-id="${step.id}" data-field="escalation_path" value="${step.controls.escalation_path}" placeholder="Who to contact if risks elevate?">
+                  <input type="text" class="gov-input" data-id="${escapeAttr(step.id)}" data-field="escalation_path" aria-label="Escalation Path" value="${escapeAttr(step.controls.escalation_path)}" placeholder="Who to contact if risks elevate?">
                 </div>
               </div>
             </div>
@@ -622,23 +783,23 @@ class App {
         <p>Analyse the systemic risks and human accountability requirements of this workflow design.</p>
         
         <div class="form-group">
-          <label>Where could this workflow fail? (Failure Modes)</label>
-          <textarea class="reflection-input" data-field="failure_modes" rows="3">${reflection.failure_modes}</textarea>
+          <label for="failure_modes">Where could this workflow fail? (Failure Modes)</label>
+          <textarea id="failure_modes" class="reflection-input" data-field="failure_modes" aria-label="Failure Modes" rows="3">${escapeHtml(reflection.failure_modes)}</textarea>
         </div>
 
         <div class="form-group">
-          <label>Where is human judgement essential?</label>
-          <textarea class="reflection-input" data-field="essential_judgement" rows="3">${reflection.essential_judgement}</textarea>
+          <label for="essential_judgement">Where is human judgement essential?</label>
+          <textarea id="essential_judgement" class="reflection-input" data-field="essential_judgement" aria-label="Essential Human Judgement" rows="3">${escapeHtml(reflection.essential_judgement)}</textarea>
         </div>
 
         <div class="form-group">
-          <label>Where is AI over-relied upon?</label>
-          <textarea class="reflection-input" data-field="over_reliance_risks" rows="3">${reflection.over_reliance_risks}</textarea>
+          <label for="over_reliance_risks">Where is AI over-relied upon?</label>
+          <textarea id="over_reliance_risks" class="reflection-input" data-field="over_reliance_risks" aria-label="AI Over-reliance Risks" rows="3">${escapeHtml(reflection.over_reliance_risks)}</textarea>
         </div>
 
         <div class="form-group">
-          <label>What assumptions are embedded in this design?</label>
-          <textarea class="reflection-input" data-field="embedded_assumptions" rows="3">${reflection.embedded_assumptions}</textarea>
+          <label for="embedded_assumptions">What assumptions are embedded in this design?</label>
+          <textarea id="embedded_assumptions" class="reflection-input" data-field="embedded_assumptions" aria-label="Embedded Assumptions" rows="3">${escapeHtml(reflection.embedded_assumptions)}</textarea>
         </div>
       </div>
     `;
@@ -663,7 +824,7 @@ class App {
             <span class="metric-title">JSON Specification</span>
           </div>
           <p>Export the full machine-readable workflow specification for integration or backup.</p>
-          <button id="export-json" class="btn btn-primary">Export JSON</button>
+          <button id="export-json" class="btn btn-primary" aria-label="Export workflow as JSON specification">Export JSON</button>
         </div>
 
         <div class="metric-card">
@@ -671,7 +832,7 @@ class App {
             <span class="metric-title">Markdown Document</span>
           </div>
           <p>Generate a structured governance report in Markdown format for documentation.</p>
-          <button id="export-markdown" class="btn btn-primary">Export Markdown</button>
+          <button id="export-markdown" class="btn btn-primary" aria-label="Export workflow as Markdown document">Export Markdown</button>
         </div>
 
         <div class="metric-card">
@@ -679,7 +840,7 @@ class App {
             <span class="metric-title">Printable Report (PDF)</span>
           </div>
           <p>Generate a professional, human-readable PDF report of the workflow design.</p>
-          <button id="export-pdf" class="btn btn-primary">Export PDF / Print</button>
+          <button id="export-pdf" class="btn btn-primary" aria-label="Export workflow as printable PDF">Export PDF / Print</button>
         </div>
       </div>
 
@@ -707,23 +868,58 @@ class App {
   private importJSON() {
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.json';
+    input.accept = '.json,application/json';
     input.onchange = (e) => {
       const file = (e.target as HTMLInputElement).files?.[0];
-      if (file) {
-        const reader = new FileReader();
-        reader.onload = (re) => {
-          try {
-            const data = JSON.parse(re.target?.result as string);
-            this.store = data;
-            this.saveToStorage();
-            this.render();
-          } catch (err) {
-            alert('Invalid JSON file.');
-          }
-        };
-        reader.readAsText(file);
-      }
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = (re) => {
+        const content = re.target?.result as string;
+
+        // 1. Validate file content before modifying any state
+        const validation = validateWorkflowImport(content);
+        if (!validation.valid || !validation.store) {
+          alert(
+            `Import Rejected — Malformed or Incompatible JSON:\n\n• ${validation.errors.join('\n• ')}\n\nYour active workflow has NOT been modified.`
+          );
+          return;
+        }
+
+        // 2. Warn about non-blocking warnings if any
+        if (validation.warnings.length > 0) {
+          const proceed = confirm(
+            `Import Warnings:\n• ${validation.warnings.join('\n• ')}\n\nDo you want to proceed with this import?`
+          );
+          if (!proceed) return;
+        }
+
+        // 3. Create protective backup before replacing current work
+        const backupResult = this.storageManager.createProtectiveBackup();
+        if (!backupResult.success) {
+          alert(
+            `Import Aborted: Protective backup failed (${backupResult.error}).\n\nYour existing workflow could not be safely backed up. To protect your data, please click "Export JSON" first.`
+          );
+          return;
+        }
+
+        // 4. Safely apply imported workflow
+        this.store = validation.store;
+        this.isDemoMode = false;
+        this.hideDemoBanner();
+
+        const saveResult = this.storageManager.saveWorkflow(this.store);
+        this.render();
+
+        if (!saveResult.success) {
+          alert(
+            `Workflow imported into memory, but local storage could not be updated:\n${saveResult.error}\n\nPlease export your workflow as JSON to preserve it.`
+          );
+        } else {
+          alert(`Workflow "${this.store.metadata.title}" successfully imported.`);
+        }
+      };
+      reader.readAsText(file);
     };
     input.click();
   }
@@ -734,4 +930,7 @@ class App {
   }
 }
 
-new App();
+// Instantiate application in browser environment
+if (typeof document !== 'undefined') {
+  new App();
+}

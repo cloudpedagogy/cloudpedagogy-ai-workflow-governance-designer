@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CloudPedagogy | AI Workflow Governance Designer</title>
     <meta name="description" content="A governance-ready design environment for creating, analysing, and documenting AI-supported workflows." />
@@ -51,11 +51,14 @@
           </div>
           <div class="header-divider">/</div>
           <h1 id="view-title">Dashboard</h1>
+          <div id="save-status-container" class="save-status-container" role="status" aria-live="polite">
+            <span id="save-status" class="save-status-badge status-saved">✓ Saved</span>
+          </div>
           <div class="top-actions">
-            <button id="load-demo" class="btn btn-secondary">Demo Example</button>
-            <button id="new-workflow" class="btn btn-secondary">New Workflow</button>
-            <button id="save-workflow" class="btn btn-primary">Save Local</button>
-            <button id="import-workflow" class="btn btn-secondary">Import JSON</button>
+            <button id="load-demo" class="btn btn-secondary" aria-label="Load healthcare demo example">Demo Example</button>
+            <button id="new-workflow" class="btn btn-secondary" aria-label="Create a new workflow">New Workflow</button>
+            <button id="save-workflow" class="btn btn-primary" aria-label="Save workflow to local storage">Save Local</button>
+            <button id="import-workflow" class="btn btn-secondary" aria-label="Import workflow from JSON file">Import JSON</button>
           </div>
         </header>
 

@@ -14,11 +14,13 @@ export interface WorkflowStep {
   ai_involvement: {
     ai_role: string;
     reliance_level: RelianceLevel;
+    [key: string]: any;
   };
   human_oversight: {
     responsible_role: string;
     oversight_level: OversightLevel;
     intervention_points: string;
+    [key: string]: any;
   };
   risks: {
     bias_risk: string;
@@ -26,12 +28,15 @@ export interface WorkflowStep {
     ethical_risk: string;
     privacy_risk: string;
     mitigation: string;
+    [key: string]: any;
   };
   controls: {
     approval_required: boolean;
     escalation_path: string;
     review_cycle: string;
+    [key: string]: any;
   };
+  [key: string]: any;
 }
 
 export interface WorkflowMetadata {
@@ -45,6 +50,7 @@ export interface WorkflowMetadata {
   domain: string;
   capabilityNotes?: string;
   governanceNotes?: string;
+  [key: string]: any;
 }
 
 export interface Reflection {
@@ -52,12 +58,14 @@ export interface Reflection {
   essential_judgement: string;
   over_reliance_risks: string;
   embedded_assumptions: string;
+  [key: string]: any;
 }
 
 export interface WorkflowStore {
   metadata: WorkflowMetadata;
   steps: WorkflowStep[];
   reflection: Reflection;
+  [key: string]: any;
 }
 
 export const INITIAL_STATE: WorkflowStore = {
