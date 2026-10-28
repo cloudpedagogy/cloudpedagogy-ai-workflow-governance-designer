@@ -686,4 +686,383 @@ describe('Batch 2 — Governance Functionality & Multi-Workflow Registry', () =>
       'Ranks abstracts by relevance score'
     );
   });
+
+  it('9. [Defect 3A] preserves unsaved in-memory workflow edits across initial placeholder recovery and all subsequent registry operations', () => {
+    let failWrites = false;
+    const controlledStorage: Storage = {
+      getItem: (k: string) => backingMap.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        if (failWrites && (k === STORAGE_KEY || k === REGISTRY_KEY)) {
+          const err = new Error('QuotaExceededError');
+          err.name = 'QuotaExceededError';
+          throw err;
+        }
+        backingMap.set(k, String(v));
+      },
+      removeItem: (k: string) => backingMap.delete(k),
+      clear: () => backingMap.clear(),
+      key: (i: number) => Array.from(backingMap.keys())[i] ?? null,
+      get length() {
+        return backingMap.size;
+      }
+    };
+
+    // Sequence 3A-1: Initial placeholder edited while storage fails, then storage recovers and a second workflow is imported/saved
+    const manager = new StorageManager(controlledStorage);
+    const app = new App(manager);
+    const initialPlaceholderId = app.getStore().metadata.id;
+
+    failWrites = true;
+    app.getStore().metadata.title = 'Unsaved Initial Placeholder Draft';
+    app.getStore().metadata.owner = 'Dr. Placeholder';
+    expect((app as any).saveToStorage()).toBe(false);
+    expect(app.getHasUnsavedChanges()).toBe(true);
+
+    // Storage recovers; user imports a second workflow
+    failWrites = false;
+    const importPayload = JSON.stringify({
+      metadata: {
+        workflow_id: 'imported-wf-2',
+        workflow_title: 'Imported Second Workflow',
+        workflow_owner: 'Owner 2',
+        purpose: 'Second workflow purpose'
+      },
+      steps: []
+    });
+    expect(app.importWorkflowContent(importPayload)).toBe(true);
+
+    // Initial placeholder with unsaved edits MUST NOT be deleted from inMemoryWorkflows or omitted from REGISTRY_KEY
+    const listAfterImport = app.listWorkflows();
+    expect(listAfterImport.map(w => w.id)).toEqual([initialPlaceholderId, 'imported-wf-2']);
+    expect(listAfterImport.find(w => w.id === initialPlaceholderId)?.title).toBe(
+      'Unsaved Initial Placeholder Draft'
+    );
+
+    // Sequence 3A-2: Persisted workflow W1 edited in memory while storage fails, then storage recovers and create/duplicate/rename/delete run
+    app.switchWorkflow(initialPlaceholderId);
+    failWrites = true;
+    app.getStore().metadata.title = 'W1 Newer In-Memory Title v2';
+    expect((app as any).saveToStorage()).toBe(false);
+
+    // Storage recovers; user creates W3 in registry (and duplicates/renames/deletes)
+    failWrites = false;
+    expect(app.createWorkflowInRegistry('Workflow Three')).toBe(true);
+    expect(app.duplicateCurrentWorkflow()).toBe(true);
+    const dupId = app.getStore().metadata.id;
+    expect(app.renameCurrentWorkflow('Workflow Three Copy Renamed')).toBe(true);
+    expect(app.deleteWorkflowById(dupId)).toBe(true);
+
+    // Simulate full browser reload: W1 must have 'W1 Newer In-Memory Title v2', NOT the older persisted title!
+    createTestDOM();
+    const reloadedApp = new App(new StorageManager(controlledStorage));
+    expect(reloadedApp.switchWorkflow(initialPlaceholderId)).toBe(true);
+    expect(reloadedApp.getStore().metadata.title).toBe('W1 Newer In-Memory Title v2');
+    expect(reloadedApp.getStore().metadata.owner).toBe('Dr. Placeholder');
+  });
+
+  it('10. [Defect 3B] separates workflow content unsaved state from active-pointer persistence failure during repeated switches', () => {
+    let failWrites = false;
+    const controlledStorage: Storage = {
+      getItem: (k: string) => backingMap.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        if (failWrites && (k === STORAGE_KEY || k === REGISTRY_KEY)) {
+          const err = new Error('QuotaExceededError');
+          err.name = 'QuotaExceededError';
+          throw err;
+        }
+        backingMap.set(k, String(v));
+      },
+      removeItem: (k: string) => backingMap.delete(k),
+      clear: () => backingMap.clear(),
+      key: (i: number) => Array.from(backingMap.keys())[i] ?? null,
+      get length() {
+        return backingMap.size;
+      }
+    };
+
+    const manager = new StorageManager(controlledStorage);
+    const app = new App(manager);
+
+    app.getStore().metadata.title = 'Saved Workflow 1';
+    (app as any).saveToStorage();
+    const wf1Id = app.getStore().metadata.id;
+
+    app.createWorkflowInRegistry('Saved Workflow 2');
+    const wf2Id = app.getStore().metadata.id;
+
+    // Switch to WF 1 and edit its content while storage fails
+    app.switchWorkflow(wf1Id);
+    failWrites = true;
+    app.getStore().metadata.title = 'Edited Unsaved Workflow 1';
+    (app as any).saveToStorage();
+    expect(app.getHasUnsavedChanges()).toBe(true);
+
+    // Switch to unmodified WF 2 while storage writes still fail
+    expect(app.switchWorkflow(wf2Id)).toBe(true);
+    expect(app.getStore().metadata.id).toBe(wf2Id);
+    expect(app.getStore().metadata.title).toBe('Saved Workflow 2');
+    // Crucially: WF 2 content was NOT modified, so getHasUnsavedChanges() is false, while status badge shows storage error
+    expect(app.getHasUnsavedChanges()).toBe(false);
+    expect(document.getElementById('save-status')?.className).toContain('status-error');
+
+    // Switch back and forth repeatedly while storage fails
+    expect(app.switchWorkflow(wf1Id)).toBe(true);
+    expect(app.getHasUnsavedChanges()).toBe(true);
+    expect(app.switchWorkflow(wf2Id)).toBe(true);
+    expect(app.getHasUnsavedChanges()).toBe(false);
+
+    // WF 2 must NOT be contaminated in unsavedWorkflowIds
+    expect(manager.isWorkflowUnsaved(wf2Id)).toBe(false);
+    expect(manager.isWorkflowUnsaved(wf1Id)).toBe(true);
+
+    // Restore storage and switch again
+    failWrites = false;
+    expect(app.switchWorkflow(wf1Id)).toBe(true);
+    expect(app.getHasUnsavedChanges()).toBe(true);
+    expect(app.switchWorkflow(wf2Id)).toBe(true);
+    expect(app.getHasUnsavedChanges()).toBe(false);
+    expect(document.getElementById('save-status')?.className).toContain('status-saved');
+
+    const summaries = app.listWorkflows();
+    expect(summaries.find(w => w.id === wf1Id)?.hasUnsavedChanges).toBe(true);
+    expect(summaries.find(w => w.id === wf2Id)?.hasUnsavedChanges).toBe(false);
+  });
+
+  it('11. [Defect 4A] protects newer registry records from older STORAGE_KEY mirror on startup and synchronizes active mirror safely', () => {
+    const wf1Newer: WorkflowStore = {
+      ...JSON.parse(JSON.stringify(DEMO_STATE)),
+      metadata: {
+        ...DEMO_STATE.metadata,
+        id: 'wf-1',
+        title: 'Authoritative Newer WF 1 in Registry'
+      }
+    };
+    const wf2Active: WorkflowStore = {
+      ...JSON.parse(JSON.stringify(DEMO_STATE)),
+      metadata: {
+        ...DEMO_STATE.metadata,
+        id: 'wf-2',
+        title: 'Authoritative Active WF 2 in Registry'
+      }
+    };
+    const wf1OlderMirror: WorkflowStore = {
+      ...JSON.parse(JSON.stringify(DEMO_STATE)),
+      metadata: {
+        ...DEMO_STATE.metadata,
+        id: 'wf-1',
+        title: 'Stale Older Mirror WF 1 in STORAGE_KEY'
+      }
+    };
+
+    const existingRegistry = {
+      format: 'cloudpedagogy_workflow_registry',
+      registry_version: '1.0.0',
+      updated_at: '2026-04-01T00:00:00Z',
+      active_workflow_id: 'wf-2',
+      workflow_order: ['wf-1', 'wf-2'],
+      workflows: {
+        'wf-1': wf1Newer,
+        'wf-2': wf2Active
+      }
+    };
+
+    customStorage.setItem(REGISTRY_KEY, JSON.stringify(existingRegistry));
+    customStorage.setItem(STORAGE_KEY, JSON.stringify(wf1OlderMirror));
+
+    const app = new App(new StorageManager(customStorage));
+
+    // 1. Loads registry's active_workflow_id ('wf-2')
+    expect(app.getStore().metadata.id).toBe('wf-2');
+    expect(app.getStore().metadata.title).toBe('Authoritative Active WF 2 in Registry');
+
+    // 2. Synchronizes STORAGE_KEY mirror to 'wf-2'
+    expect(JSON.parse(customStorage.getItem(STORAGE_KEY)!).metadata.id).toBe('wf-2');
+
+    // 3. Does NOT overwrite 'wf-1' in registry with stale mirror from STORAGE_KEY
+    app.switchWorkflow('wf-1');
+    expect(app.getStore().metadata.title).toBe('Authoritative Newer WF 1 in Registry');
+
+    // 4. If mirror synchronization fails on startup (e.g. quota error writing STORAGE_KEY), preserves registry and reports error non-destructively
+    customStorage.setItem(REGISTRY_KEY, JSON.stringify(existingRegistry));
+    customStorage.setItem(STORAGE_KEY, JSON.stringify(wf1OlderMirror));
+    const readOnlyMirrorStorage: Storage = {
+      getItem: (k: string) => backingMap.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        if (k === STORAGE_KEY) {
+          const err = new Error('QuotaExceededError: Cannot sync mirror');
+          err.name = 'QuotaExceededError';
+          throw err;
+        }
+        backingMap.set(k, String(v));
+      },
+      removeItem: (k: string) => backingMap.delete(k),
+      clear: () => backingMap.clear(),
+      key: (i: number) => Array.from(backingMap.keys())[i] ?? null,
+      get length() {
+        return backingMap.size;
+      }
+    };
+
+    createTestDOM();
+    const appSyncFail = new App(new StorageManager(readOnlyMirrorStorage));
+    expect(appSyncFail.getStore().metadata.id).toBe('wf-2');
+    expect(appSyncFail.getStore().metadata.title).toBe('Authoritative Active WF 2 in Registry');
+    expect(document.getElementById('save-status')?.className).toContain('status-error');
+    expect(JSON.parse(readOnlyMirrorStorage.getItem(REGISTRY_KEY)!).workflows['wf-1'].metadata.title).toBe(
+      'Authoritative Newer WF 1 in Registry'
+    );
+  });
+
+  it('12. [Defect 5A] verifies dual-key rollback, reports rollback failure/divergence explicitly, and does not commit unpersisted registry state', () => {
+    let failFirstWrite = false;
+    let failSecondWrite = false;
+    let failRollbackWrite = false;
+    let activeWriteCount = 0;
+
+    const controlledStorage: Storage = {
+      getItem: (k: string) => backingMap.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        if (k === STORAGE_KEY) {
+          activeWriteCount++;
+          if (failFirstWrite) {
+            const err = new Error('QuotaExceededError: First write failed');
+            err.name = 'QuotaExceededError';
+            throw err;
+          }
+          if (failRollbackWrite && activeWriteCount >= 2) {
+            throw new Error('SecurityError: Rollback write blocked');
+          }
+        }
+        if (k === REGISTRY_KEY && failSecondWrite) {
+          const err = new Error('QuotaExceededError: Second write failed');
+          err.name = 'QuotaExceededError';
+          throw err;
+        }
+        backingMap.set(k, String(v));
+      },
+      removeItem: (k: string) => backingMap.delete(k),
+      clear: () => backingMap.clear(),
+      key: (i: number) => Array.from(backingMap.keys())[i] ?? null,
+      get length() {
+        return backingMap.size;
+      }
+    };
+
+    const manager = new StorageManager(controlledStorage);
+    const app = new App(manager);
+    app.getStore().metadata.title = 'Persisted Baseline Workflow';
+    (app as any).saveToStorage();
+    const baselineId = app.getStore().metadata.id;
+    const priorActiveRaw = controlledStorage.getItem(STORAGE_KEY);
+    const priorRegistryRaw = controlledStorage.getItem(REGISTRY_KEY);
+
+    // Case 1: Failed first write (STORAGE_KEY)
+    failFirstWrite = true;
+    activeWriteCount = 0;
+    const res1 = manager.createWorkflowInRegistry('Failed Create 1', app.getStore(), false);
+    expect(res1.success).toBe(false);
+    expect(res1.rollbackFailed).toBe(false);
+    expect(controlledStorage.getItem(STORAGE_KEY)).toBe(priorActiveRaw);
+    expect(controlledStorage.getItem(REGISTRY_KEY)).toBe(priorRegistryRaw);
+    // Persisted registry inside manager was NOT mutated to include 'Failed Create 1'
+    expect((manager as any).registry.workflow_order).toEqual([baselineId]);
+
+    // Case 2: Failed second write (REGISTRY_KEY) with successful rollback
+    failFirstWrite = false;
+    failSecondWrite = true;
+    activeWriteCount = 0;
+    const res2 = manager.saveWorkflow({
+      ...app.getStore(),
+      metadata: { ...app.getStore().metadata, title: 'Updated Title Failing Registry Write' }
+    });
+    expect(res2.success).toBe(false);
+    expect(res2.rollbackFailed).toBe(false);
+    expect(controlledStorage.getItem(STORAGE_KEY)).toBe(priorActiveRaw);
+    expect(controlledStorage.getItem(REGISTRY_KEY)).toBe(priorRegistryRaw);
+
+    // Case 3: Failed second write (REGISTRY_KEY) AND failed rollback of STORAGE_KEY -> explicit rollback failure & divergence reported
+    failRollbackWrite = true;
+    activeWriteCount = 0;
+    const res3 = manager.saveWorkflow({
+      ...app.getStore(),
+      metadata: { ...app.getStore().metadata, title: 'Divergent Title After Failed Rollback' }
+    });
+    expect(res3.success).toBe(false);
+    expect(res3.rollbackFailed).toBe(true);
+    expect(res3.error).toContain('Rollback verification failed');
+    expect(res3.error).toContain('active mirror restored: false');
+    // Latest valid in-memory workflow data remains preserved for recovery export
+    expect(manager.getWorkflowById(baselineId)?.metadata.title).toBe(
+      'Divergent Title After Failed Rollback'
+    );
+  });
+
+  it('13. [Defect 6A] rejects registry imports with duplicate effective workflow IDs or conflicting key/metadata IDs', () => {
+    const manager = new StorageManager(customStorage);
+    const app = new App(manager);
+    app.getStore().metadata.title = 'Protected Existing Registry WF';
+    (app as any).saveToStorage();
+
+    // 1. Two differently keyed records resolving to the same metadata.workflow_id
+    const duplicateIdPayload = JSON.stringify({
+      format: 'cloudpedagogy_workflow_registry',
+      registry_version: '1.0.0',
+      active_workflow_id: 'shared-uuid-999',
+      workflow_order: ['key_one', 'key_two'],
+      workflows: {
+        key_one: {
+          metadata: {
+            workflow_id: 'shared-uuid-999',
+            workflow_title: 'First Colliding Workflow',
+            workflow_owner: 'Owner A',
+            purpose: 'Purpose A'
+          },
+          steps: []
+        },
+        key_two: {
+          metadata: {
+            workflow_id: 'shared-uuid-999',
+            workflow_title: 'Second Colliding Workflow',
+            workflow_owner: 'Owner B',
+            purpose: 'Purpose B'
+          },
+          steps: []
+        }
+      }
+    });
+
+    const dupValidation = validateRegistryImport(duplicateIdPayload);
+    expect(dupValidation.valid).toBe(false);
+    expect(dupValidation.errors.some(e => e.includes('Duplicate workflow ID "shared-uuid-999"'))).toBe(
+      true
+    );
+
+    expect(app.importRegistryContent(duplicateIdPayload)).toBe(false);
+    expect(app.listWorkflows().length).toBe(1);
+    expect(app.getStore().metadata.title).toBe('Protected Existing Registry WF');
+
+    // 2. Metadata ID colliding with another workflow key in the registry map
+    const keyCollisionPayload = JSON.stringify({
+      format: 'cloudpedagogy_workflow_registry',
+      registry_version: '1.0.0',
+      workflows: {
+        alpha: {
+          metadata: { id: 'beta', title: 'Alpha claiming Beta ID' },
+          steps: []
+        },
+        beta: {
+          metadata: { id: 'gamma', title: 'Beta claiming Gamma ID' },
+          steps: []
+        }
+      }
+    });
+
+    const keyCollisionResult = validateRegistryImport(keyCollisionPayload);
+    expect(keyCollisionResult.valid).toBe(false);
+    expect(
+      keyCollisionResult.errors.some(e => e.includes('conflicts with workflow key "beta"'))
+    ).toBe(true);
+    expect(app.importRegistryContent(keyCollisionPayload)).toBe(false);
+    expect(app.getStore().metadata.title).toBe('Protected Existing Registry WF');
+  });
 });

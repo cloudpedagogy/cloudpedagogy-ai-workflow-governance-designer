@@ -388,12 +388,10 @@ export class App {
     this.expandedStepIds.clear();
     this.hasUnsavedChanges = Boolean(res.hasUnsavedChanges);
 
-    if (this.hasUnsavedChanges) {
-      if (res.error) {
-        this.updateSaveStatus('error', res.error);
-      } else {
-        this.updateSaveStatus('unsaved');
-      }
+    if (res.activeSwitchPersistFailed || res.error) {
+      this.updateSaveStatus('error', res.error);
+    } else if (this.hasUnsavedChanges) {
+      this.updateSaveStatus('unsaved');
     } else {
       this.updateSaveStatus('saved');
     }
@@ -655,6 +653,10 @@ export class App {
       return false;
     }
 
+    if (this.preDemoStore && hasMeaningfulWorkflowData(this.preDemoStore)) {
+      this.storageManager.syncInMemoryWorkflow(this.preDemoStore, this.preDemoHadUnsavedChanges);
+    }
+
     // Prepare candidate workflow copy with a fresh UUID
     const candidateStore: WorkflowStore = JSON.parse(JSON.stringify(this.store));
     candidateStore.metadata.id = generateUUID();
@@ -815,6 +817,13 @@ export class App {
           `Cannot create new workflow: Protective backup failed (${backupResult.error}).\n\nOpen the "Export" tab and click "Export Draft / Recovery JSON" first to prevent data loss.`
         );
         return;
+      }
+
+      if (backupTarget && hasMeaningfulWorkflowData(backupTarget)) {
+        this.storageManager.syncInMemoryWorkflow(
+          backupTarget,
+          this.isDemoMode ? this.preDemoHadUnsavedChanges : this.hasUnsavedChanges
+        );
       }
 
       const newStore: WorkflowStore = JSON.parse(JSON.stringify(INITIAL_STATE));
@@ -1818,6 +1827,13 @@ export class App {
         `Import Aborted: Protective backup failed (${backupResult.error}).\n\nYour existing workflow could not be safely backed up. Open the "Export" tab and click "Export Draft / Recovery JSON" first.`
       );
       return false;
+    }
+
+    if (backupTarget && hasMeaningfulWorkflowData(backupTarget)) {
+      this.storageManager.syncInMemoryWorkflow(
+        backupTarget,
+        this.isDemoMode ? this.preDemoHadUnsavedChanges : this.hasUnsavedChanges
+      );
     }
 
     const importedStore = validation.store!;

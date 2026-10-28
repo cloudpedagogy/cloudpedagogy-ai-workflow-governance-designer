@@ -25,6 +25,7 @@ export interface StorageSaveResult {
   error?: string;
   isQuotaExceeded?: boolean;
   isCorruptedLocked?: boolean;
+  rollbackFailed?: boolean;
 }
 
 export interface BackupResult {
@@ -64,6 +65,8 @@ export interface RegistryActionResult {
   persisted: boolean;
   activeWorkflow: WorkflowStore;
   hasUnsavedChanges?: boolean;
+  activeSwitchPersistFailed?: boolean;
+  rollbackFailed?: boolean;
   backedUp?: boolean;
   error?: string;
   isQuotaExceeded?: boolean;
@@ -114,8 +117,11 @@ function isQuotaError(e: any): boolean {
 /**
  * StorageManager provides resilient persistence using both the versioned local registry
  * (cp_workflow_designer_registry) and the active workflow mirror (cp_workflow_designer).
- * Handles legacy migration, storage unavailability, quota exhaustion, corrupt storage protection,
- * working-draft persistence, unsaved in-memory workflow switching, and protective backups.
+ *
+ * State separation:
+ * - `this.registry` tracks the last known persisted registry state (only updated on verified writes/loads).
+ * - `this.inMemoryWorkflows`, `this.inMemoryOrder`, and `this.inMemoryActiveId` track the live working session.
+ * - `this.unsavedWorkflowIds` tracks strictly those workflows whose content has unpersisted in-memory edits.
  */
 export class StorageManager {
   private customStorage?: Storage;
@@ -124,12 +130,16 @@ export class StorageManager {
   private hasInspectedStorage: boolean = false;
   private registry: WorkflowRegistry = createInitialRegistry();
   private inMemoryWorkflows: Map<string, WorkflowStore> = new Map();
+  private inMemoryOrder: string[] = [];
+  private inMemoryActiveId: string = '';
   private unsavedWorkflowIds: Set<string> = new Set();
   private isInitialPlaceholder: boolean = true;
 
   constructor(customStorage?: Storage) {
     this.customStorage = customStorage;
     const activeId = this.registry.active_workflow_id;
+    this.inMemoryActiveId = activeId;
+    this.inMemoryOrder = [activeId];
     this.inMemoryWorkflows.set(activeId, cloneWorkflow(this.registry.workflows[activeId]));
   }
 
@@ -170,7 +180,7 @@ export class StorageManager {
   }
 
   /**
-   * Synchronizes the in-memory working copy and unsaved status of a workflow
+   * Synchronizes the in-memory working copy and content-unsaved status of a workflow
    * so switching workflows never loses unsaved in-memory edits.
    */
   public syncInMemoryWorkflow(store: WorkflowStore, hasUnsavedChanges: boolean): void {
@@ -179,11 +189,11 @@ export class StorageManager {
     store.metadata.id = id;
     const cloned = cloneWorkflow(store);
     this.inMemoryWorkflows.set(id, cloned);
-    if (!this.registry.workflows[id]) {
-      this.registry.workflows[id] = cloned;
+    if (!this.inMemoryOrder.includes(id)) {
+      this.inMemoryOrder.push(id);
     }
-    if (!this.registry.workflow_order.includes(id)) {
-      this.registry.workflow_order.push(id);
+    if (hasMeaningfulWorkflowData(cloned) || hasUnsavedChanges) {
+      this.isInitialPlaceholder = false;
     }
     if (hasUnsavedChanges) {
       this.unsavedWorkflowIds.add(id);
@@ -197,31 +207,74 @@ export class StorageManager {
   }
 
   /**
+   * Builds a candidate WorkflowRegistry preferring the latest in-memory workflow state
+   * over older persisted copies in `this.registry.workflows`.
+   * Never discards an initial placeholder if it has meaningful data or unsaved edits in `inMemoryWorkflows`.
+   */
+  private buildNextRegistryFromMemory(activeId: string, excludeId?: string): WorkflowRegistry {
+    const combinedOrder: string[] = [];
+    for (const id of this.inMemoryOrder) {
+      if (id && id !== excludeId && !combinedOrder.includes(id)) {
+        combinedOrder.push(id);
+      }
+    }
+    for (const id of this.registry.workflow_order) {
+      if (id && id !== excludeId && !combinedOrder.includes(id)) {
+        combinedOrder.push(id);
+      }
+    }
+    for (const id of this.inMemoryWorkflows.keys()) {
+      if (id && id !== excludeId && !combinedOrder.includes(id)) {
+        combinedOrder.push(id);
+      }
+    }
+    for (const id of Object.keys(this.registry.workflows)) {
+      if (id && id !== excludeId && !combinedOrder.includes(id)) {
+        combinedOrder.push(id);
+      }
+    }
+
+    const workflows: Record<string, WorkflowStore> = {};
+    const finalOrder: string[] = [];
+
+    for (const id of combinedOrder) {
+      const latestWf = this.inMemoryWorkflows.get(id) ?? this.registry.workflows[id];
+      if (!latestWf) continue;
+
+      if (
+        this.isInitialPlaceholder &&
+        id !== activeId &&
+        !hasMeaningfulWorkflowData(latestWf) &&
+        !this.unsavedWorkflowIds.has(id)
+      ) {
+        this.inMemoryWorkflows.delete(id);
+        this.inMemoryOrder = this.inMemoryOrder.filter(k => k !== id);
+        continue;
+      }
+
+      workflows[id] = cloneWorkflow(latestWf);
+      finalOrder.push(id);
+    }
+
+    const resolvedActiveId =
+      activeId && workflows[activeId] ? activeId : finalOrder[0] || activeId;
+
+    return {
+      format: REGISTRY_FORMAT,
+      registry_version: this.registry.registry_version || REGISTRY_VERSION,
+      updated_at: new Date().toISOString(),
+      active_workflow_id: resolvedActiveId,
+      workflow_order: finalOrder,
+      workflows
+    };
+  }
+
+  /**
    * Returns a snapshot of the full workflow registry including any unsaved in-memory edits.
    */
   public getRegistrySnapshot(): WorkflowRegistry {
-    const snapshot: WorkflowRegistry = {
-      format: REGISTRY_FORMAT,
-      registry_version: this.registry.registry_version || REGISTRY_VERSION,
-      updated_at: this.registry.updated_at || new Date().toISOString(),
-      active_workflow_id: this.registry.active_workflow_id,
-      workflow_order: [...this.registry.workflow_order],
-      workflows: {}
-    };
-
-    for (const id of snapshot.workflow_order) {
-      const wf = this.inMemoryWorkflows.get(id) ?? this.registry.workflows[id];
-      if (wf) {
-        snapshot.workflows[id] = cloneWorkflow(wf);
-      }
-    }
-    for (const [id, wf] of Object.entries(this.registry.workflows)) {
-      if (!snapshot.workflows[id]) {
-        snapshot.workflows[id] = cloneWorkflow(this.inMemoryWorkflows.get(id) ?? wf);
-        snapshot.workflow_order.push(id);
-      }
-    }
-    return snapshot;
+    const activeId = this.inMemoryActiveId || this.registry.active_workflow_id;
+    return this.buildNextRegistryFromMemory(activeId);
   }
 
   /**
@@ -251,22 +304,36 @@ export class StorageManager {
   }
 
   public getActiveWorkflowId(): string {
-    return this.registry.active_workflow_id;
+    return this.inMemoryActiveId || this.registry.active_workflow_id;
+  }
+
+  private resetWorkingStateFromRegistry(reg: WorkflowRegistry, isPlaceholder: boolean): void {
+    this.registry = reg;
+    this.inMemoryWorkflows.clear();
+    this.inMemoryOrder = [...reg.workflow_order];
+    this.inMemoryActiveId = reg.active_workflow_id;
+    for (const [id, wf] of Object.entries(reg.workflows)) {
+      this.inMemoryWorkflows.set(id, cloneWorkflow(wf));
+      if (!this.inMemoryOrder.includes(id)) {
+        this.inMemoryOrder.push(id);
+      }
+    }
+    this.unsavedWorkflowIds.clear();
+    this.isInitialPlaceholder = isPlaceholder;
   }
 
   /**
    * Loads and validates workflows from local storage, safely migrating legacy
    * cp_workflow_designer records into the versioned registry without duplicating
-   * records on subsequent launches or overwriting corrupted storage data.
+   * records on subsequent launches, overwriting newer registry records with an
+   * older compatibility mirror, or overwriting corrupted storage data.
    */
   public loadWorkflow(): StorageLoadResult {
     const s = this.storage;
     if (!s) {
       const fallback = cloneInitialState();
-      this.registry = createInitialRegistry(fallback);
-      this.inMemoryWorkflows.clear();
-      this.inMemoryWorkflows.set(fallback.metadata.id, cloneWorkflow(fallback));
-      this.unsavedWorkflowIds.clear();
+      const reg = createInitialRegistry(fallback);
+      this.resetWorkingStateFromRegistry(reg, true);
       return {
         success: false,
         data: fallback,
@@ -287,9 +354,7 @@ export class StorageManager {
           this.isCorruptedLocked = true;
           this.corruptedRawData = rawLegacy;
           const safeFallback = cloneInitialState();
-          this.registry = createInitialRegistry(safeFallback);
-          this.inMemoryWorkflows.clear();
-          this.inMemoryWorkflows.set(safeFallback.metadata.id, cloneWorkflow(safeFallback));
+          this.resetWorkingStateFromRegistry(createInitialRegistry(safeFallback), true);
           return {
             success: false,
             data: safeFallback,
@@ -308,9 +373,7 @@ export class StorageManager {
           this.isCorruptedLocked = true;
           this.corruptedRawData = rawRegistry;
           const fallbackData = legacyStore ? cloneWorkflow(legacyStore) : cloneInitialState();
-          this.registry = createInitialRegistry(fallbackData);
-          this.inMemoryWorkflows.clear();
-          this.inMemoryWorkflows.set(fallbackData.metadata.id, cloneWorkflow(fallbackData));
+          this.resetWorkingStateFromRegistry(createInitialRegistry(fallbackData), !legacyStore);
           return {
             success: false,
             data: fallbackData,
@@ -324,10 +387,7 @@ export class StorageManager {
       // 3. Empty storage (neither legacy key nor registry key exists)
       if (!legacyStore && !loadedRegistry) {
         const fresh = cloneInitialState();
-        this.registry = createInitialRegistry(fresh);
-        this.inMemoryWorkflows.clear();
-        this.inMemoryWorkflows.set(fresh.metadata.id, cloneWorkflow(fresh));
-        this.unsavedWorkflowIds.clear();
+        this.resetWorkingStateFromRegistry(createInitialRegistry(fresh), true);
 
         if (!this.isAvailable()) {
           return {
@@ -338,7 +398,6 @@ export class StorageManager {
         }
         this.isCorruptedLocked = false;
         this.corruptedRawData = null;
-        this.isInitialPlaceholder = true;
         return {
           success: true,
           data: fresh,
@@ -352,7 +411,6 @@ export class StorageManager {
         legacyStore.metadata.id = wfId;
         const migratedRegistry = createInitialRegistry(legacyStore);
 
-        // Attempt atomic write of REGISTRY_KEY without touching STORAGE_KEY or BACKUP_KEY
         try {
           const serializedReg = JSON.stringify(migratedRegistry);
           s.setItem(REGISTRY_KEY, serializedReg);
@@ -360,8 +418,6 @@ export class StorageManager {
             s.removeItem(REGISTRY_KEY);
           }
         } catch {
-          // If quota prevents writing REGISTRY_KEY during startup migration, roll back partial write
-          // and keep legacy STORAGE_KEY untouched while operating with migratedRegistry in memory.
           try {
             s.removeItem(REGISTRY_KEY);
           } catch {
@@ -369,48 +425,34 @@ export class StorageManager {
           }
         }
 
-        this.registry = migratedRegistry;
-        this.inMemoryWorkflows.clear();
-        this.inMemoryWorkflows.set(wfId, cloneWorkflow(legacyStore));
-        this.unsavedWorkflowIds.clear();
+        this.resetWorkingStateFromRegistry(migratedRegistry, false);
         this.isCorruptedLocked = false;
         this.corruptedRawData = null;
-        this.isInitialPlaceholder = false;
         return {
           success: true,
           data: cloneWorkflow(legacyStore)
         };
       }
 
-      // 5. REGISTRY_KEY exists and is valid; reconcile with legacyStore if present without duplicating
+      // 5. REGISTRY_KEY exists and is valid -> treat REGISTRY_KEY as authoritative for IDs already present!
       const reg = loadedRegistry!;
+      let registryModifiedByUnmigratedLegacy = false;
+
       if (legacyStore) {
         const legacyId = legacyStore.metadata.id || generateUUID();
         legacyStore.metadata.id = legacyId;
 
         if (reg.workflows[legacyId]) {
-          // Already in registry: update in place without adding duplicate order entry
-          reg.workflows[legacyId] = cloneWorkflow(legacyStore);
+          // Defect 4A fix: Do NOT overwrite authoritative registry workflow with an older STORAGE_KEY mirror.
           if (!reg.workflow_order.includes(legacyId)) {
             reg.workflow_order.push(legacyId);
           }
-        } else {
-          // External or unmigrated legacy workflow in STORAGE_KEY: merge into registry without losing existing entries
+        } else if (hasMeaningfulWorkflowData(legacyStore)) {
+          // Legacy workflow ID is absent from registry and has meaningful data: safely include it without
+          // clobbering existing registry workflows or overriding an existing valid active_workflow_id.
           reg.workflows[legacyId] = cloneWorkflow(legacyStore);
           reg.workflow_order.push(legacyId);
-          reg.active_workflow_id = legacyId;
-          try {
-            const updatedRegStr = JSON.stringify(reg);
-            s.setItem(REGISTRY_KEY, updatedRegStr);
-          } catch {
-            if (rawRegistry) {
-              try {
-                s.setItem(REGISTRY_KEY, rawRegistry);
-              } catch {
-                // Ignore
-              }
-            }
-          }
+          registryModifiedByUnmigratedLegacy = true;
         }
       }
 
@@ -420,25 +462,61 @@ export class StorageManager {
           : reg.workflow_order[0];
       reg.active_workflow_id = activeId;
 
-      this.registry = reg;
-      this.inMemoryWorkflows.clear();
-      for (const [id, wf] of Object.entries(reg.workflows)) {
-        this.inMemoryWorkflows.set(id, cloneWorkflow(wf));
-      }
-      this.unsavedWorkflowIds.clear();
+      const authoritativeActiveWf = reg.workflows[activeId];
+      const serializedAuthoritativeActive = JSON.stringify(authoritativeActiveWf);
+
+      this.resetWorkingStateFromRegistry(reg, false);
       this.isCorruptedLocked = false;
       this.corruptedRawData = null;
-      this.isInitialPlaceholder = false;
+
+      // Keep the active-workflow mirror consistent with the registry's active_workflow_id where storage permits
+      let mirrorSyncError: string | undefined;
+      if (registryModifiedByUnmigratedLegacy) {
+        try {
+          const updatedRegStr = JSON.stringify(reg);
+          s.setItem(REGISTRY_KEY, updatedRegStr);
+          if (s.getItem(REGISTRY_KEY) !== updatedRegStr && rawRegistry) {
+            s.setItem(REGISTRY_KEY, rawRegistry);
+          }
+        } catch (regSyncErr: any) {
+          if (rawRegistry) {
+            try {
+              s.setItem(REGISTRY_KEY, rawRegistry);
+            } catch {
+              // Ignore
+            }
+          }
+          mirrorSyncError = `Registry migration update failed: ${regSyncErr?.message || 'Storage write error'}`;
+        }
+      }
+
+      if (rawLegacy !== null && rawLegacy !== serializedAuthoritativeActive) {
+        try {
+          s.setItem(STORAGE_KEY, serializedAuthoritativeActive);
+          if (s.getItem(STORAGE_KEY) !== serializedAuthoritativeActive) {
+            mirrorSyncError =
+              'Active workflow mirror in local storage could not be verified after synchronization with the registry.';
+          }
+        } catch (syncErr: any) {
+          mirrorSyncError = `Active workflow mirror could not be synchronized with registry: ${syncErr?.message || 'Storage write error'}`;
+        }
+      }
+
+      if (mirrorSyncError) {
+        return {
+          success: false,
+          data: cloneWorkflow(authoritativeActiveWf),
+          error: mirrorSyncError
+        };
+      }
 
       return {
         success: true,
-        data: cloneWorkflow(reg.workflows[activeId])
+        data: cloneWorkflow(authoritativeActiveWf)
       };
     } catch (e: any) {
       const fallback = cloneInitialState();
-      this.registry = createInitialRegistry(fallback);
-      this.inMemoryWorkflows.clear();
-      this.inMemoryWorkflows.set(fallback.metadata.id, cloneWorkflow(fallback));
+      this.resetWorkingStateFromRegistry(createInitialRegistry(fallback), true);
       return {
         success: false,
         data: fallback,
@@ -448,8 +526,10 @@ export class StorageManager {
   }
 
   /**
-   * Atomically writes the active workflow to STORAGE_KEY and the full registry to REGISTRY_KEY.
-   * Rolls back both keys to their exact prior values if either write fails.
+   * Writes the active workflow to STORAGE_KEY and the full registry to REGISTRY_KEY.
+   * If either write fails, attempts to roll back both keys to their prior values,
+   * verifies both keys against their prior values, and explicitly reports rollback failure
+   * and potential key divergence if verification fails.
    */
   private persistRegistryAndActiveAtomically(
     nextRegistry: WorkflowRegistry,
@@ -507,8 +587,11 @@ export class StorageManager {
     try {
       prevActiveRaw = s.getItem(STORAGE_KEY);
       prevRegistryRaw = s.getItem(REGISTRY_KEY);
-    } catch {
-      // Handled below
+    } catch (readErr: any) {
+      return {
+        success: false,
+        error: `Failed to read existing storage state prior to write: ${readErr?.message || 'Storage read error'}`
+      };
     }
 
     try {
@@ -519,49 +602,71 @@ export class StorageManager {
       s.setItem(REGISTRY_KEY, serializedRegistry);
 
       if (s.getItem(STORAGE_KEY) !== serializedActive || s.getItem(REGISTRY_KEY) !== serializedRegistry) {
-        throw new Error('Failed to verify atomic storage write.');
+        throw new Error('Failed to verify dual-key storage write.');
       }
 
-      return { success: true };
+      return { success: true, rollbackFailed: false };
     } catch (e: any) {
-      // Roll back both keys so no partial registry or active workflow mutation remains
+      let rollbackErrors: string[] = [];
       try {
-        if (prevActiveRaw === null) {
-          s.removeItem(STORAGE_KEY);
-        } else {
-          s.setItem(STORAGE_KEY, prevActiveRaw);
+        if (s.getItem(STORAGE_KEY) !== prevActiveRaw) {
+          if (prevActiveRaw === null) {
+            s.removeItem(STORAGE_KEY);
+          } else {
+            s.setItem(STORAGE_KEY, prevActiveRaw);
+          }
         }
-      } catch {
-        // Ignore rollback write failure
+      } catch (rbActiveErr: any) {
+        rollbackErrors.push(`Active mirror rollback error: ${rbActiveErr?.message || 'write failed'}`);
       }
+
       try {
-        if (prevRegistryRaw === null) {
-          s.removeItem(REGISTRY_KEY);
-        } else {
-          s.setItem(REGISTRY_KEY, prevRegistryRaw);
+        if (s.getItem(REGISTRY_KEY) !== prevRegistryRaw) {
+          if (prevRegistryRaw === null) {
+            s.removeItem(REGISTRY_KEY);
+          } else {
+            s.setItem(REGISTRY_KEY, prevRegistryRaw);
+          }
         }
-      } catch {
-        // Ignore rollback write failure
+      } catch (rbRegErr: any) {
+        rollbackErrors.push(`Registry rollback error: ${rbRegErr?.message || 'write failed'}`);
       }
+
+      let activeVerified = false;
+      let registryVerified = false;
+      try {
+        activeVerified = s.getItem(STORAGE_KEY) === prevActiveRaw;
+        registryVerified = s.getItem(REGISTRY_KEY) === prevRegistryRaw;
+      } catch {
+        activeVerified = false;
+        registryVerified = false;
+      }
+
+      const rollbackFailed = !activeVerified || !registryVerified || rollbackErrors.length > 0;
+      const rollbackNotice = rollbackFailed
+        ? ` Rollback verification failed (active mirror restored: ${activeVerified}, registry restored: ${registryVerified}${rollbackErrors.length > 0 ? '; ' + rollbackErrors.join('; ') : ''}). Storage keys may have diverged; export a Full Registry Backup immediately.`
+        : '';
 
       if (isQuotaError(e)) {
         return {
           success: false,
-          error:
-            'Storage quota exceeded. Your workflow cannot be saved locally. Export as JSON immediately to preserve your changes.',
-          isQuotaExceeded: true
+          isQuotaExceeded: true,
+          rollbackFailed,
+          error: `Storage quota exceeded. Your workflow cannot be saved locally. Export as JSON immediately to preserve your changes.${rollbackNotice}`
         };
       }
 
       return {
         success: false,
-        error: `Failed to persist workflow: ${e?.message || 'Unknown storage error'}`
+        rollbackFailed,
+        error: `Failed to persist workflow: ${e?.message || 'Unknown storage error'}${rollbackNotice}`
       };
     }
   }
 
   /**
-   * Saves the given workflow as the active workflow in local storage and updates the registry atomically.
+   * Saves the given workflow as the active workflow in local storage and updates the registry.
+   * Uses the latest in-memory state across all workflows and only commits `this.registry` on verified persistence.
    */
   public saveWorkflow(store: WorkflowStore): StorageSaveResult {
     if (!store.metadata.id) {
@@ -569,53 +674,68 @@ export class StorageManager {
     }
     const wfId = store.metadata.id;
     const cloned = cloneWorkflow(store);
+    const existedInSession =
+      this.inMemoryWorkflows.has(wfId) || Boolean(this.registry.workflows[wfId]);
+    const prevInMemoryWf = this.inMemoryWorkflows.get(wfId);
+    const prevOrder = [...this.inMemoryOrder];
+    const prevActiveId = this.inMemoryActiveId;
+    const prevPlaceholder = this.isInitialPlaceholder;
 
-    // Keep in-memory copy updated even if persistence fails
+    // Stage working in-memory copy to build candidate registry
     this.inMemoryWorkflows.set(wfId, cloned);
-
-    const nextRegistry: WorkflowRegistry = {
-      format: REGISTRY_FORMAT,
-      registry_version: this.registry.registry_version || REGISTRY_VERSION,
-      updated_at: new Date().toISOString(),
-      active_workflow_id: wfId,
-      workflow_order: [...this.registry.workflow_order],
-      workflows: {}
-    };
-
-    for (const [id, wf] of Object.entries(this.registry.workflows)) {
-      if (!wf) continue;
-      if (this.isInitialPlaceholder && id !== wfId && !hasMeaningfulWorkflowData(wf)) {
-        this.inMemoryWorkflows.delete(id);
-        continue;
-      }
-      nextRegistry.workflows[id] = cloneWorkflow(wf);
+    if (!this.inMemoryOrder.includes(wfId)) {
+      this.inMemoryOrder.push(wfId);
     }
-    nextRegistry.workflows[wfId] = cloned;
-    nextRegistry.workflow_order = nextRegistry.workflow_order.filter(id => Boolean(nextRegistry.workflows[id]));
-    if (!nextRegistry.workflow_order.includes(wfId)) {
-      nextRegistry.workflow_order.push(wfId);
-    }
+    this.inMemoryActiveId = wfId;
 
+    const nextRegistry = this.buildNextRegistryFromMemory(wfId);
     const result = this.persistRegistryAndActiveAtomically(nextRegistry, cloned);
+
     if (result.success) {
       this.registry = nextRegistry;
+      this.inMemoryOrder = [...nextRegistry.workflow_order];
       this.isInitialPlaceholder = false;
-      this.unsavedWorkflowIds.delete(wfId);
-    } else {
+      for (const persistedId of Object.keys(nextRegistry.workflows)) {
+        this.unsavedWorkflowIds.delete(persistedId);
+      }
+    } else if (existedInSession) {
+      // Existing workflow in session edited while storage failed: keep in memory and mark unsaved
+      this.inMemoryOrder = prevOrder;
+      if (!this.inMemoryOrder.includes(wfId)) {
+        this.inMemoryOrder.push(wfId);
+      }
+      for (const [id, wf] of Object.entries(this.registry.workflows)) {
+        if (!this.inMemoryWorkflows.has(id)) {
+          this.inMemoryWorkflows.set(id, cloneWorkflow(wf));
+        }
+      }
+      if (hasMeaningfulWorkflowData(cloned)) {
+        this.isInitialPlaceholder = false;
+      }
       this.unsavedWorkflowIds.add(wfId);
-      if (!this.registry.workflows[wfId]) {
-        this.registry.workflows[wfId] = cloned;
+    } else {
+      // Unpersisted speculative candidate (e.g. failed New Workflow / failed Import / failed Demo Copy):
+      // revert candidate from in-memory session so aborted operations leave no phantom workflows
+      if (prevInMemoryWf) {
+        this.inMemoryWorkflows.set(wfId, prevInMemoryWf);
+      } else {
+        this.inMemoryWorkflows.delete(wfId);
       }
-      if (!this.registry.workflow_order.includes(wfId)) {
-        this.registry.workflow_order.push(wfId);
+      for (const [id, wf] of Object.entries(this.registry.workflows)) {
+        if (!this.inMemoryWorkflows.has(id)) {
+          this.inMemoryWorkflows.set(id, cloneWorkflow(wf));
+        }
       }
-      this.registry.active_workflow_id = wfId;
+      this.inMemoryOrder = prevOrder;
+      this.inMemoryActiveId = prevActiveId;
+      this.isInitialPlaceholder = prevPlaceholder;
+      this.unsavedWorkflowIds.delete(wfId);
     }
     return result;
   }
 
   /**
-   * Creates a new workflow in the registry while preserving all existing workflows in the registry.
+   * Creates a new workflow in the registry while preserving all existing workflows and unsaved edits.
    */
   public createWorkflowInRegistry(
     initialTitle: string = '',
@@ -630,39 +750,21 @@ export class StorageManager {
     const newWf = cloneInitialState(initialTitle);
     const newId = newWf.metadata.id;
 
-    const nextRegistry: WorkflowRegistry = {
-      format: REGISTRY_FORMAT,
-      registry_version: this.registry.registry_version || REGISTRY_VERSION,
-      updated_at: new Date().toISOString(),
-      active_workflow_id: newId,
-      workflow_order: [...this.registry.workflow_order],
-      workflows: {}
-    };
-
-    for (const [id, wf] of Object.entries(this.registry.workflows)) {
-      nextRegistry.workflows[id] = cloneWorkflow(wf);
-    }
-    if (currentInMemoryStore && currentInMemoryStore.metadata?.id) {
-      const currId = currentInMemoryStore.metadata.id;
-      if (!nextRegistry.workflows[currId]) {
-        nextRegistry.workflows[currId] = cloneWorkflow(currentInMemoryStore);
-      }
-      if (!nextRegistry.workflow_order.includes(currId)) {
-        nextRegistry.workflow_order.push(currId);
-      }
-    }
-
-    nextRegistry.workflows[newId] = cloneWorkflow(newWf);
-    if (!nextRegistry.workflow_order.includes(newId)) {
-      nextRegistry.workflow_order.push(newId);
-    }
-
-    const saveResult = this.persistRegistryAndActiveAtomically(nextRegistry, newWf);
     this.inMemoryWorkflows.set(newId, cloneWorkflow(newWf));
+    if (!this.inMemoryOrder.includes(newId)) {
+      this.inMemoryOrder.push(newId);
+    }
+    this.inMemoryActiveId = newId;
+
+    const nextRegistry = this.buildNextRegistryFromMemory(newId);
+    const saveResult = this.persistRegistryAndActiveAtomically(nextRegistry, newWf);
 
     if (saveResult.success) {
       this.registry = nextRegistry;
-      this.unsavedWorkflowIds.delete(newId);
+      this.inMemoryOrder = [...nextRegistry.workflow_order];
+      for (const persistedId of Object.keys(nextRegistry.workflows)) {
+        this.unsavedWorkflowIds.delete(persistedId);
+      }
       return {
         success: true,
         persisted: true,
@@ -671,12 +773,12 @@ export class StorageManager {
       };
     }
 
-    // Even if storage write failed, preserve in memory or report error
-    this.registry = nextRegistry;
+    // Do NOT commit nextRegistry to this.registry when persistence fails (Defect 5A)
     this.unsavedWorkflowIds.add(newId);
     return {
       success: false,
       persisted: false,
+      rollbackFailed: saveResult.rollbackFailed,
       activeWorkflow: cloneWorkflow(newWf),
       hasUnsavedChanges: true,
       error: saveResult.error,
@@ -688,6 +790,8 @@ export class StorageManager {
   /**
    * Switches the active workflow in the registry while preserving unsaved in-memory edits
    * on both the outgoing workflow and the target workflow.
+   * Strictly separates workflow content unsaved state (`hasUnsavedChanges`) from a failure
+   * to persist the active-workflow pointer (`activeSwitchPersistFailed`).
    */
   public switchWorkflow(
     targetId: string,
@@ -700,10 +804,11 @@ export class StorageManager {
 
     const targetWf = this.inMemoryWorkflows.get(targetId) ?? this.registry.workflows[targetId];
     if (!targetWf) {
+      const currentActiveId = this.inMemoryActiveId || this.registry.active_workflow_id;
       const currentActive =
         currentInMemoryStore ??
-        this.inMemoryWorkflows.get(this.registry.active_workflow_id) ??
-        this.registry.workflows[this.registry.active_workflow_id] ??
+        this.inMemoryWorkflows.get(currentActiveId) ??
+        this.registry.workflows[currentActiveId] ??
         cloneInitialState();
       return {
         success: false,
@@ -714,6 +819,7 @@ export class StorageManager {
       };
     }
 
+    this.inMemoryActiveId = targetId;
     const targetIsUnsaved = this.unsavedWorkflowIds.has(targetId);
     const persistedTargetWf = this.registry.workflows[targetId] ?? targetWf;
 
@@ -731,23 +837,27 @@ export class StorageManager {
       nextRegistry.workflow_order.push(targetId);
     }
 
-    this.registry = nextRegistry;
-
-    // Only overwrite STORAGE_KEY if the target workflow doesn't have unpersisted changes or if we persist its last saved state
     const saveResult = this.persistRegistryAndActiveAtomically(nextRegistry, persistedTargetWf);
+    if (saveResult.success) {
+      this.registry = nextRegistry;
+    }
 
     return {
       success: true,
       persisted: saveResult.success && !targetIsUnsaved,
+      activeSwitchPersistFailed: !saveResult.success,
+      rollbackFailed: saveResult.rollbackFailed,
       activeWorkflow: cloneWorkflow(targetWf),
-      hasUnsavedChanges: targetIsUnsaved || !saveResult.success,
-      error: saveResult.error
+      hasUnsavedChanges: targetIsUnsaved,
+      error: saveResult.error,
+      isQuotaExceeded: saveResult.isQuotaExceeded,
+      isCorruptedLocked: saveResult.isCorruptedLocked
     };
   }
 
   /**
    * Duplicates a workflow in the registry with a fresh workflow UUID while preserving
-   * all step data, governance settings, and unknown fields.
+   * all step data, governance settings, unsaved in-memory edits, and unknown fields.
    */
   public duplicateWorkflow(
     sourceId?: string,
@@ -758,7 +868,7 @@ export class StorageManager {
       this.syncInMemoryWorkflow(currentInMemoryStore, currentHasUnsaved);
     }
 
-    const resolvedSourceId = sourceId || this.registry.active_workflow_id;
+    const resolvedSourceId = sourceId || this.inMemoryActiveId || this.registry.active_workflow_id;
     const sourceWf =
       (currentInMemoryStore && currentInMemoryStore.metadata?.id === resolvedSourceId
         ? currentInMemoryStore
@@ -776,6 +886,7 @@ export class StorageManager {
       };
     }
 
+    this.isInitialPlaceholder = false;
     const duplicate = cloneWorkflow(sourceWf);
     const newId = generateUUID();
     duplicate.metadata.id = newId;
@@ -783,32 +894,22 @@ export class StorageManager {
     const baseTitle = duplicate.metadata.title?.trim() || 'Untitled Workflow';
     duplicate.metadata.title = `${baseTitle} (Copy)`;
 
-    const nextRegistry: WorkflowRegistry = {
-      format: REGISTRY_FORMAT,
-      registry_version: this.registry.registry_version || REGISTRY_VERSION,
-      updated_at: new Date().toISOString(),
-      active_workflow_id: newId,
-      workflow_order: [...this.registry.workflow_order],
-      workflows: {}
-    };
-    for (const [id, wf] of Object.entries(this.registry.workflows)) {
-      nextRegistry.workflows[id] = cloneWorkflow(wf);
+    this.inMemoryWorkflows.set(newId, cloneWorkflow(duplicate));
+    if (!this.inMemoryOrder.includes(newId)) {
+      this.inMemoryOrder.push(newId);
     }
-    if (!nextRegistry.workflows[resolvedSourceId]) {
-      nextRegistry.workflows[resolvedSourceId] = cloneWorkflow(sourceWf);
-    }
-    if (!nextRegistry.workflow_order.includes(resolvedSourceId)) {
-      nextRegistry.workflow_order.push(resolvedSourceId);
-    }
+    const prevActiveId = this.inMemoryActiveId;
+    this.inMemoryActiveId = newId;
 
-    nextRegistry.workflows[newId] = cloneWorkflow(duplicate);
-    nextRegistry.workflow_order.push(newId);
-
+    const nextRegistry = this.buildNextRegistryFromMemory(newId);
     const saveResult = this.persistRegistryAndActiveAtomically(nextRegistry, duplicate);
+
     if (saveResult.success) {
       this.registry = nextRegistry;
-      this.inMemoryWorkflows.set(newId, cloneWorkflow(duplicate));
-      this.unsavedWorkflowIds.delete(newId);
+      this.inMemoryOrder = [...nextRegistry.workflow_order];
+      for (const persistedId of Object.keys(nextRegistry.workflows)) {
+        this.unsavedWorkflowIds.delete(persistedId);
+      }
       return {
         success: true,
         persisted: true,
@@ -817,9 +918,15 @@ export class StorageManager {
       };
     }
 
+    // Revert in-memory duplicate candidate on failure so state remains coherent
+    this.inMemoryWorkflows.delete(newId);
+    this.inMemoryOrder = this.inMemoryOrder.filter(k => k !== newId);
+    this.inMemoryActiveId = prevActiveId || resolvedSourceId;
+
     return {
       success: false,
       persisted: false,
+      rollbackFailed: saveResult.rollbackFailed,
       activeWorkflow: cloneWorkflow(sourceWf),
       hasUnsavedChanges: currentHasUnsaved,
       error: saveResult.error,
@@ -829,7 +936,7 @@ export class StorageManager {
   }
 
   /**
-   * Renames a workflow in the registry and persists atomically.
+   * Renames a workflow in the registry and persists using the latest in-memory state across all workflows.
    */
   public renameWorkflow(
     targetId: string,
@@ -852,34 +959,23 @@ export class StorageManager {
       };
     }
 
+    const previousWf = cloneWorkflow(wf);
     const updatedWf = cloneWorkflow(wf);
     updatedWf.metadata.title = newTitle.trim();
 
-    const nextRegistry: WorkflowRegistry = {
-      format: REGISTRY_FORMAT,
-      registry_version: this.registry.registry_version || REGISTRY_VERSION,
-      updated_at: new Date().toISOString(),
-      active_workflow_id: this.registry.active_workflow_id,
-      workflow_order: [...this.registry.workflow_order],
-      workflows: {}
-    };
-    for (const [id, existing] of Object.entries(this.registry.workflows)) {
-      nextRegistry.workflows[id] = cloneWorkflow(existing);
-    }
-    nextRegistry.workflows[targetId] = cloneWorkflow(updatedWf);
-    if (!nextRegistry.workflow_order.includes(targetId)) {
-      nextRegistry.workflow_order.push(targetId);
-    }
+    this.isInitialPlaceholder = false;
+    this.inMemoryWorkflows.set(targetId, cloneWorkflow(updatedWf));
 
-    const activeId = nextRegistry.active_workflow_id;
-    const activeWf = nextRegistry.workflows[activeId] ?? updatedWf;
+    const activeId = this.inMemoryActiveId || this.registry.active_workflow_id;
+    const nextRegistry = this.buildNextRegistryFromMemory(activeId);
+    const activeWf = nextRegistry.workflows[nextRegistry.active_workflow_id] ?? updatedWf;
 
     const saveResult = this.persistRegistryAndActiveAtomically(nextRegistry, activeWf);
     if (saveResult.success) {
       this.registry = nextRegistry;
-      this.inMemoryWorkflows.set(targetId, cloneWorkflow(updatedWf));
-      if (targetId === activeId) {
-        this.unsavedWorkflowIds.delete(targetId);
+      this.inMemoryOrder = [...nextRegistry.workflow_order];
+      for (const persistedId of Object.keys(nextRegistry.workflows)) {
+        this.unsavedWorkflowIds.delete(persistedId);
       }
       return {
         success: true,
@@ -889,10 +985,13 @@ export class StorageManager {
       };
     }
 
+    // Revert in-memory title change on failed rename so state matches pre-rename state
+    this.inMemoryWorkflows.set(targetId, previousWf);
     return {
       success: false,
       persisted: false,
-      activeWorkflow: cloneWorkflow(wf),
+      rollbackFailed: saveResult.rollbackFailed,
+      activeWorkflow: cloneWorkflow(previousWf),
       hasUnsavedChanges: currentHasUnsaved,
       error: saveResult.error,
       isQuotaExceeded: saveResult.isQuotaExceeded,
@@ -902,7 +1001,7 @@ export class StorageManager {
 
   /**
    * Deletes a workflow from the registry after creating a verified protective backup.
-   * Rolls back atomically if persistence fails.
+   * Uses the latest in-memory state of all remaining workflows and rolls back if persistence fails.
    */
   public deleteWorkflow(
     targetId: string,
@@ -935,45 +1034,37 @@ export class StorageManager {
       };
     }
 
-    const nextOrder = this.registry.workflow_order.filter(id => id !== targetId);
-    const nextWorkflows: Record<string, WorkflowStore> = {};
-    for (const [id, wf] of Object.entries(this.registry.workflows)) {
-      if (id !== targetId) {
-        nextWorkflows[id] = cloneWorkflow(wf);
-      }
-    }
+    const currentActiveId = this.inMemoryActiveId || this.registry.active_workflow_id;
+    const candidateRegistry = this.buildNextRegistryFromMemory(currentActiveId, targetId);
 
     let nextActiveWf: WorkflowStore;
     let nextActiveId: string;
 
-    if (nextOrder.length === 0 || Object.keys(nextWorkflows).length === 0) {
+    if (
+      candidateRegistry.workflow_order.length === 0 ||
+      Object.keys(candidateRegistry.workflows).length === 0
+    ) {
       nextActiveWf = cloneInitialState();
       nextActiveId = nextActiveWf.metadata.id;
-      nextWorkflows[nextActiveId] = cloneWorkflow(nextActiveWf);
-      nextOrder.push(nextActiveId);
+      candidateRegistry.workflows[nextActiveId] = cloneWorkflow(nextActiveWf);
+      candidateRegistry.workflow_order = [nextActiveId];
+      candidateRegistry.active_workflow_id = nextActiveId;
     } else {
       nextActiveId =
-        this.registry.active_workflow_id !== targetId && nextWorkflows[this.registry.active_workflow_id]
-          ? this.registry.active_workflow_id
-          : nextOrder[0];
-      nextActiveWf = cloneWorkflow(this.inMemoryWorkflows.get(nextActiveId) ?? nextWorkflows[nextActiveId]);
+        currentActiveId !== targetId && candidateRegistry.workflows[currentActiveId]
+          ? currentActiveId
+          : candidateRegistry.workflow_order[0];
+      candidateRegistry.active_workflow_id = nextActiveId;
+      nextActiveWf = cloneWorkflow(candidateRegistry.workflows[nextActiveId]);
     }
 
-    const nextRegistry: WorkflowRegistry = {
-      format: REGISTRY_FORMAT,
-      registry_version: this.registry.registry_version || REGISTRY_VERSION,
-      updated_at: new Date().toISOString(),
-      active_workflow_id: nextActiveId,
-      workflow_order: nextOrder,
-      workflows: nextWorkflows
-    };
-
-    const saveResult = this.persistRegistryAndActiveAtomically(nextRegistry, nextActiveWf);
+    const saveResult = this.persistRegistryAndActiveAtomically(candidateRegistry, nextActiveWf);
     if (!saveResult.success) {
       this.rollbackProtectiveBackup(backupResult.previousBackup);
       return {
         success: false,
         persisted: false,
+        rollbackFailed: saveResult.rollbackFailed,
         activeWorkflow: cloneWorkflow(targetWf),
         hasUnsavedChanges: currentHasUnsaved,
         error: saveResult.error,
@@ -982,10 +1073,15 @@ export class StorageManager {
       };
     }
 
-    this.registry = nextRegistry;
+    this.registry = candidateRegistry;
     this.inMemoryWorkflows.delete(targetId);
     this.unsavedWorkflowIds.delete(targetId);
+    this.inMemoryOrder = [...candidateRegistry.workflow_order];
+    this.inMemoryActiveId = nextActiveId;
     this.inMemoryWorkflows.set(nextActiveId, cloneWorkflow(nextActiveWf));
+    for (const persistedId of Object.keys(candidateRegistry.workflows)) {
+      this.unsavedWorkflowIds.delete(persistedId);
+    }
 
     return {
       success: true,
@@ -997,19 +1093,20 @@ export class StorageManager {
   }
 
   /**
-   * Atomically replaces the workflow registry from a validated registry backup payload,
+   * Replaces the workflow registry from a validated registry backup payload,
    * creating a protective backup first and rolling back if persistence fails.
    */
   public replaceRegistry(
     newRegistry: WorkflowRegistry,
     backupTarget?: WorkflowStore
   ): RegistryActionResult {
+    const currentActiveId = this.inMemoryActiveId || this.registry.active_workflow_id;
     const backupResult = this.createProtectiveBackup(backupTarget);
     if (!backupResult.success) {
       const currentActive =
         backupTarget ??
-        this.inMemoryWorkflows.get(this.registry.active_workflow_id) ??
-        this.registry.workflows[this.registry.active_workflow_id] ??
+        this.inMemoryWorkflows.get(currentActiveId) ??
+        this.registry.workflows[currentActiveId] ??
         cloneInitialState();
       return {
         success: false,
@@ -1042,12 +1139,13 @@ export class StorageManager {
       this.rollbackProtectiveBackup(backupResult.previousBackup);
       const currentActive =
         backupTarget ??
-        this.inMemoryWorkflows.get(this.registry.active_workflow_id) ??
-        this.registry.workflows[this.registry.active_workflow_id] ??
+        this.inMemoryWorkflows.get(currentActiveId) ??
+        this.registry.workflows[currentActiveId] ??
         cloneInitialState();
       return {
         success: false,
         persisted: false,
+        rollbackFailed: saveResult.rollbackFailed,
         activeWorkflow: cloneWorkflow(currentActive),
         error: saveResult.error,
         isQuotaExceeded: saveResult.isQuotaExceeded,
@@ -1055,12 +1153,7 @@ export class StorageManager {
       };
     }
 
-    this.registry = normalizedRegistry;
-    this.inMemoryWorkflows.clear();
-    for (const [id, wf] of Object.entries(normalizedRegistry.workflows)) {
-      this.inMemoryWorkflows.set(id, cloneWorkflow(wf));
-    }
-    this.unsavedWorkflowIds.clear();
+    this.resetWorkingStateFromRegistry(normalizedRegistry, false);
 
     return {
       success: true,
@@ -1300,8 +1393,12 @@ export class StorageManager {
       const verified = s.getItem(STORAGE_KEY);
       if (verified !== backup) {
         this.inMemoryWorkflows.set(restoredId, cloneWorkflow(restoredStore));
+        if (!this.inMemoryOrder.includes(restoredId)) {
+          this.inMemoryOrder.push(restoredId);
+        }
         this.unsavedWorkflowIds.add(restoredId);
-        this.registry.active_workflow_id = restoredId;
+        this.inMemoryActiveId = restoredId;
+        this.isInitialPlaceholder = false;
         return {
           success: true,
           persisted: false,
@@ -1311,13 +1408,15 @@ export class StorageManager {
       }
 
       // Synchronize registry with restored workflow
-      this.registry.workflows[restoredId] = cloneWorkflow(restoredStore);
-      if (!this.registry.workflow_order.includes(restoredId)) {
-        this.registry.workflow_order.push(restoredId);
-      }
-      this.registry.active_workflow_id = restoredId;
-      this.registry.updated_at = new Date().toISOString();
       this.inMemoryWorkflows.set(restoredId, cloneWorkflow(restoredStore));
+      if (!this.inMemoryOrder.includes(restoredId)) {
+        this.inMemoryOrder.push(restoredId);
+      }
+      this.inMemoryActiveId = restoredId;
+      this.isInitialPlaceholder = false;
+
+      const nextRegistry = this.buildNextRegistryFromMemory(restoredId);
+      this.registry = nextRegistry;
       this.unsavedWorkflowIds.delete(restoredId);
 
       try {
@@ -1336,8 +1435,12 @@ export class StorageManager {
       };
     } catch (e: any) {
       this.inMemoryWorkflows.set(restoredId, cloneWorkflow(restoredStore));
+      if (!this.inMemoryOrder.includes(restoredId)) {
+        this.inMemoryOrder.push(restoredId);
+      }
       this.unsavedWorkflowIds.add(restoredId);
-      this.registry.active_workflow_id = restoredId;
+      this.inMemoryActiveId = restoredId;
+      this.isInitialPlaceholder = false;
       return {
         success: true,
         persisted: false,

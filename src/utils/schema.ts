@@ -872,6 +872,9 @@ export function validateRegistryImport(input: unknown): RegistryValidationResult
         errors.push('Registry must contain at least one workflow in "workflows"');
       }
 
+      const allEntryKeys = new Set(entries.map(([k]) => k));
+      const seenEffectiveIds = new Map<string, string>();
+
       for (const [key, rawWf] of entries) {
         if (!key || key.trim() === '') {
           errors.push('Workflow registry contains an empty workflow key');
@@ -883,9 +886,36 @@ export function validateRegistryImport(input: unknown): RegistryValidationResult
           continue;
         }
         const store = wfResult.store;
-        // Preserve explicit workflow ID from metadata or key
         const rawMeta = isPlainObject((rawWf as any)?.metadata) ? (rawWf as any).metadata : {};
-        const explicitId = safeString(rawMeta.workflow_id ?? rawMeta.id, key) || key;
+        const rawWorkflowId =
+          typeof rawMeta.workflow_id === 'string' ? rawMeta.workflow_id.trim() : '';
+        const rawId = typeof rawMeta.id === 'string' ? rawMeta.id.trim() : '';
+
+        if (rawWorkflowId && rawId && rawWorkflowId !== rawId) {
+          errors.push(
+            `Workflow "${key}": conflicting metadata.workflow_id ("${rawWorkflowId}") and metadata.id ("${rawId}")`
+          );
+          continue;
+        }
+
+        const metaId = rawWorkflowId || rawId;
+        if (metaId && metaId !== key && allEntryKeys.has(metaId)) {
+          errors.push(
+            `Workflow "${key}": metadata ID "${metaId}" conflicts with workflow key "${metaId}"`
+          );
+          continue;
+        }
+
+        const explicitId = metaId || key;
+        if (seenEffectiveIds.has(explicitId)) {
+          const firstKey = seenEffectiveIds.get(explicitId)!;
+          errors.push(
+            `Duplicate workflow ID "${explicitId}" found in registry entries "${firstKey}" and "${key}"`
+          );
+          continue;
+        }
+
+        seenEffectiveIds.set(explicitId, key);
         store.metadata.id = explicitId;
         validatedWorkflows[explicitId] = store;
         if (wfResult.warnings.length > 0) {
