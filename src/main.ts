@@ -18,7 +18,8 @@ import {
   exportDraftToJSON,
   exportRegistryToJSON,
   exportToMarkdown,
-  exportToPDF
+  exportToPDF,
+  generatePrintableReportHTML
 } from './utils/export';
 import { generateUUID } from './utils/uuid';
 import { escapeHtml, escapeAttr } from './utils/security';
@@ -100,11 +101,13 @@ export class App {
       this.hasUnsavedChanges = true;
       this.updateCompletenessUI();
       this.updateSaveStatus('demo');
+      this.syncPrintableReport();
       return true;
     }
 
     const result = this.storageManager.saveWorkflow(this.store);
     this.updateCompletenessUI();
+    this.syncPrintableReport();
 
     if (result.success) {
       this.hasUnsavedChanges = false;
@@ -175,8 +178,8 @@ export class App {
           <strong>Corrupted Local Storage Detected:</strong> Unrecoverable data was found in browser storage. Auto-save is paused so your stored data is not silently overwritten.
         </div>
         <div class="demo-banner-actions">
-          <button id="download-corrupted-raw" class="btn btn-sm btn-primary-light" aria-label="Download preserved corrupted raw data">Download Raw Data</button>
-          <button id="discard-corrupted-storage" class="btn btn-sm btn-secondary-light" aria-label="Discard corrupted data and enable saving">Discard &amp; Start Fresh</button>
+          <button type="button" id="download-corrupted-raw" class="btn btn-sm btn-primary-light" aria-label="Download preserved corrupted raw data">Download Raw Data</button>
+          <button type="button" id="discard-corrupted-storage" class="btn btn-sm btn-secondary-light" aria-label="Discard corrupted data and enable saving">Discard &amp; Start Fresh</button>
         </div>
       `;
       document.querySelector('.content')?.prepend(banner);
@@ -279,6 +282,10 @@ export class App {
       contentEl.insertBefore(toolbar, viewContainer);
     }
 
+    const activeEl = document.activeElement as HTMLElement | null;
+    const focusedToolbarElementId =
+      activeEl && toolbar.contains(activeEl) && activeEl.id ? activeEl.id : null;
+
     if (!this.isDemoMode) {
       this.storageManager.syncInMemoryWorkflow(this.store, this.hasUnsavedChanges);
     }
@@ -329,6 +336,16 @@ export class App {
     document.getElementById('delete-workflow-btn')?.addEventListener('click', () => {
       this.deleteWorkflowById(this.store.metadata.id);
     });
+
+    if (focusedToolbarElementId) {
+      const restoredFocusEl = document.getElementById(focusedToolbarElementId) as
+        | HTMLSelectElement
+        | HTMLButtonElement
+        | null;
+      if (restoredFocusEl && !restoredFocusEl.disabled) {
+        restoredFocusEl.focus();
+      }
+    }
   }
 
   public createWorkflowInRegistry(initialTitle: string = ''): boolean {
@@ -857,7 +874,13 @@ export class App {
   private switchView(view: string) {
     this.currentView = view;
     document.querySelectorAll('.nav-item').forEach(btn => {
-      btn.classList.toggle('active', (btn as HTMLButtonElement).dataset.view === view);
+      const isActive = (btn as HTMLButtonElement).dataset.view === view;
+      btn.classList.toggle('active', isActive);
+      if (isActive) {
+        btn.setAttribute('aria-current', 'page');
+      } else {
+        btn.removeAttribute('aria-current');
+      }
     });
 
     const titleMap: Record<string, string> = {
@@ -963,7 +986,7 @@ export class App {
 
       <div class="section" style="margin-top: 32px">
         <h2>Governance Insights</h2>
-        <div class="insights-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 16px">
+        <div class="insights-grid">
           <div class="insight-group">
             <h3 style="font-size: 14px; margin-bottom: 12px; color: var(--text-primary)">Design-Time Suggestions</h3>
             <ul style="list-style: none; padding: 0; margin: 0; font-size: 13px">
@@ -1093,9 +1116,9 @@ export class App {
 
   private renderStepBuilder() {
     return `
-      <div class="section-actions" style="margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center">
+      <div class="section-actions" style="margin-bottom: 24px; display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap">
         <p style="color: var(--text-secondary)">Define the sequence of human and AI actions in this workflow.</p>
-        <button id="add-step" class="btn btn-primary" aria-label="Add new workflow step">+ Add New Step</button>
+        <button type="button" id="add-step" class="btn btn-primary" aria-label="Add new workflow step">+ Add New Step</button>
       </div>
       
       <div id="steps-list">
@@ -1136,12 +1159,13 @@ export class App {
   }
 
   private renderDecisionPointControlsHtml(step: WorkflowStep): string {
+    const sid = escapeAttr(step.id);
     return `
       <div class="governance-controls" style="border-top: 1px solid var(--border-color); margin-top: 16px; padding-top: 16px">
         <h4>Decision Point Controls</h4>
         <div class="form-group">
-          <label style="display: flex; align-items: center; gap: 8px; cursor: pointer">
-            <input type="checkbox" class="step-checkbox-nested" data-parent="controls" data-field="approval_required" aria-label="Decision Record Required" ${step.controls.approval_required ? 'checked' : ''} style="width: auto">
+          <label for="step-${sid}-approval_required" style="display: flex; align-items: center; gap: 8px; cursor: pointer">
+            <input type="checkbox" id="step-${sid}-approval_required" class="step-checkbox-nested" data-parent="controls" data-field="approval_required" aria-label="Decision Record Required" ${step.controls.approval_required ? 'checked' : ''} style="width: auto">
             Decision Record Required (Human-AI Decision Record Tool)
           </label>
         </div>
@@ -1153,29 +1177,30 @@ export class App {
     const isExpanded = this.expandedStepIds.has(step.id);
     const totalSteps = this.store.steps.length;
     const stepLabel = escapeAttr(step.name || 'Untitled');
+    const sid = escapeAttr(step.id);
 
     return `
-      <div class="step-item" data-id="${escapeAttr(step.id)}">
+      <div class="step-item" data-id="${sid}">
         <div class="step-header">
           <div class="step-header-badges" style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap">
             ${this.renderStepHeaderBadgesHtml(step, index)}
           </div>
-          <div class="step-header-actions" style="display: flex; gap: 8px; align-items: center">
+          <div class="step-header-actions" style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap">
             <button type="button" class="btn btn-secondary btn-sm move-step-up" aria-label="Move step ${index + 1}: ${stepLabel} up" ${index === 0 ? 'disabled' : ''}>↑ Move Up</button>
             <button type="button" class="btn btn-secondary btn-sm move-step-down" aria-label="Move step ${index + 1}: ${stepLabel} down" ${index === totalSteps - 1 ? 'disabled' : ''}>↓ Move Down</button>
-            <button type="button" class="btn btn-secondary btn-sm edit-step" aria-label="Edit step ${index + 1}: ${stepLabel}">Edit</button>
+            <button type="button" class="btn btn-secondary btn-sm edit-step" aria-expanded="${isExpanded ? 'true' : 'false'}" aria-controls="step-content-${sid}" aria-label="Edit step ${index + 1}: ${stepLabel}">Edit</button>
             <button type="button" class="btn btn-secondary btn-sm delete-step" aria-label="Delete step ${index + 1}: ${stepLabel}">Delete</button>
           </div>
         </div>
-        <div class="step-content${isExpanded ? ' expanded' : ''}">
+        <div id="step-content-${sid}" class="step-content${isExpanded ? ' expanded' : ''}">
           <div class="grid-2">
             <div class="form-group">
-              <label>Step Name</label>
-              <input type="text" class="step-input" data-field="name" aria-label="Step Name" value="${escapeAttr(step.name)}">
+              <label for="step-${sid}-name">Step Name</label>
+              <input type="text" id="step-${sid}-name" class="step-input" data-field="name" aria-label="Step Name" value="${escapeAttr(step.name)}">
             </div>
             <div class="form-group">
-              <label>Step Type</label>
-              <select class="step-input" data-field="type" aria-label="Step Type">
+              <label for="step-${sid}-type">Step Type</label>
+              <select id="step-${sid}-type" class="step-input" data-field="type" aria-label="Step Type">
                 <option value="human-only" ${step.type === 'human-only' ? 'selected' : ''}>Human Only</option>
                 <option value="ai-supported" ${step.type === 'ai-supported' ? 'selected' : ''}>AI Supported</option>
                 <option value="ai-generated" ${step.type === 'ai-generated' ? 'selected' : ''}>AI Generated</option>
@@ -1185,18 +1210,18 @@ export class App {
           </div>
           
           <div class="form-group">
-            <label>Description</label>
-            <textarea class="step-input" data-field="description" aria-label="Description" rows="2">${escapeHtml(step.description)}</textarea>
+            <label for="step-${sid}-description">Description</label>
+            <textarea id="step-${sid}-description" class="step-input" data-field="description" aria-label="Description" rows="2">${escapeHtml(step.description)}</textarea>
           </div>
 
           <div class="grid-2">
             <div class="form-group">
-              <label>Inputs</label>
-              <input type="text" class="step-input" data-field="inputs" aria-label="Inputs" value="${escapeAttr(step.inputs.join(', '))}" placeholder="Comma separated...">
+              <label for="step-${sid}-inputs">Inputs</label>
+              <input type="text" id="step-${sid}-inputs" class="step-input" data-field="inputs" aria-label="Inputs" value="${escapeAttr(step.inputs.join(', '))}" placeholder="Comma separated...">
             </div>
             <div class="form-group">
-              <label>Outputs</label>
-              <input type="text" class="step-input" data-field="outputs" aria-label="Outputs" value="${escapeAttr(step.outputs.join(', '))}" placeholder="Comma separated...">
+              <label for="step-${sid}-outputs">Outputs</label>
+              <input type="text" id="step-${sid}-outputs" class="step-input" data-field="outputs" aria-label="Outputs" value="${escapeAttr(step.outputs.join(', '))}" placeholder="Comma separated...">
             </div>
           </div>
 
@@ -1204,12 +1229,12 @@ export class App {
             <h4>AI Involvement &amp; Reliance</h4>
             <div class="grid-2">
               <div class="form-group">
-                <label>AI Role / Function</label>
-                <input type="text" class="step-input-nested" data-parent="ai_involvement" data-field="ai_role" aria-label="AI Role" value="${escapeAttr(step.ai_involvement.ai_role)}" placeholder="e.g. Drafts synthesis, classifies records">
+                <label for="step-${sid}-ai_role">AI Role / Function</label>
+                <input type="text" id="step-${sid}-ai_role" class="step-input-nested" data-parent="ai_involvement" data-field="ai_role" aria-label="AI Role" value="${escapeAttr(step.ai_involvement.ai_role)}" placeholder="e.g. Drafts synthesis, classifies records">
               </div>
               <div class="form-group">
-                <label>AI Reliance Level</label>
-                <select class="step-input-nested" data-parent="ai_involvement" data-field="reliance_level" aria-label="AI Reliance Level">
+                <label for="step-${sid}-reliance_level">AI Reliance Level</label>
+                <select id="step-${sid}-reliance_level" class="step-input-nested" data-parent="ai_involvement" data-field="reliance_level" aria-label="AI Reliance Level">
                   <option value="low" ${step.ai_involvement.reliance_level === 'low' ? 'selected' : ''}>Low</option>
                   <option value="medium" ${step.ai_involvement.reliance_level === 'medium' ? 'selected' : ''}>Medium</option>
                   <option value="high" ${step.ai_involvement.reliance_level === 'high' ? 'selected' : ''}>High</option>
@@ -1223,12 +1248,12 @@ export class App {
             <h4>Human-AI Boundary &amp; Oversight</h4>
             <div class="grid-2">
               <div class="form-group">
-                <label>Responsible Role</label>
-                <input type="text" class="step-input-nested" data-parent="human_oversight" data-field="responsible_role" aria-label="Responsible Role" value="${escapeAttr(step.human_oversight.responsible_role)}" placeholder="e.g. Lead Researcher">
+                <label for="step-${sid}-responsible_role">Responsible Role</label>
+                <input type="text" id="step-${sid}-responsible_role" class="step-input-nested" data-parent="human_oversight" data-field="responsible_role" aria-label="Responsible Role" value="${escapeAttr(step.human_oversight.responsible_role)}" placeholder="e.g. Lead Researcher">
               </div>
               <div class="form-group">
-                <label>Oversight Level</label>
-                <select class="step-input-nested" data-parent="human_oversight" data-field="oversight_level" aria-label="Oversight Level">
+                <label for="step-${sid}-oversight_level">Oversight Level</label>
+                <select id="step-${sid}-oversight_level" class="step-input-nested" data-parent="human_oversight" data-field="oversight_level" aria-label="Oversight Level">
                   <option value="none" ${step.human_oversight.oversight_level === 'none' ? 'selected' : ''}>None</option>
                   <option value="minimal" ${step.human_oversight.oversight_level === 'minimal' ? 'selected' : ''}>Minimal (Outcome only)</option>
                   <option value="active" ${step.human_oversight.oversight_level === 'active' ? 'selected' : ''}>Active (Process review)</option>
@@ -1237,8 +1262,8 @@ export class App {
               </div>
             </div>
             <div class="form-group">
-              <label>Intervention Points</label>
-              <input type="text" class="step-input-nested" data-parent="human_oversight" data-field="intervention_points" aria-label="Intervention Points" value="${escapeAttr(step.human_oversight.intervention_points)}" placeholder="Where can a human override?">
+              <label for="step-${sid}-intervention_points">Intervention Points</label>
+              <input type="text" id="step-${sid}-intervention_points" class="step-input-nested" data-parent="human_oversight" data-field="intervention_points" aria-label="Intervention Points" value="${escapeAttr(step.human_oversight.intervention_points)}" placeholder="Where can a human override?">
             </div>
           </div>
 
@@ -1246,27 +1271,27 @@ export class App {
             <h4>Risk Identification Layer</h4>
             <div class="grid-2">
               <div class="form-group">
-                <label>Bias / Fairness Risk</label>
-                <input type="text" class="step-input-nested" data-parent="risks" data-field="bias_risk" aria-label="Bias / Fairness Risk" value="${escapeAttr(step.risks.bias_risk)}">
+                <label for="step-${sid}-bias_risk">Bias / Fairness Risk</label>
+                <input type="text" id="step-${sid}-bias_risk" class="step-input-nested" data-parent="risks" data-field="bias_risk" aria-label="Bias / Fairness Risk" value="${escapeAttr(step.risks.bias_risk)}">
               </div>
               <div class="form-group">
-                <label>Operational Risk</label>
-                <input type="text" class="step-input-nested" data-parent="risks" data-field="operational_risk" aria-label="Operational Risk" value="${escapeAttr(step.risks.operational_risk)}">
+                <label for="step-${sid}-operational_risk">Operational Risk</label>
+                <input type="text" id="step-${sid}-operational_risk" class="step-input-nested" data-parent="risks" data-field="operational_risk" aria-label="Operational Risk" value="${escapeAttr(step.risks.operational_risk)}">
               </div>
             </div>
             <div class="grid-2">
               <div class="form-group">
-                <label>Ethical Risk</label>
-                <input type="text" class="step-input-nested" data-parent="risks" data-field="ethical_risk" aria-label="Ethical Risk" value="${escapeAttr(step.risks.ethical_risk)}">
+                <label for="step-${sid}-ethical_risk">Ethical Risk</label>
+                <input type="text" id="step-${sid}-ethical_risk" class="step-input-nested" data-parent="risks" data-field="ethical_risk" aria-label="Ethical Risk" value="${escapeAttr(step.risks.ethical_risk)}">
               </div>
               <div class="form-group">
-                <label>Privacy / Data Risk</label>
-                <input type="text" class="step-input-nested" data-parent="risks" data-field="privacy_risk" aria-label="Privacy Risk" value="${escapeAttr(step.risks.privacy_risk)}">
+                <label for="step-${sid}-privacy_risk">Privacy / Data Risk</label>
+                <input type="text" id="step-${sid}-privacy_risk" class="step-input-nested" data-parent="risks" data-field="privacy_risk" aria-label="Privacy Risk" value="${escapeAttr(step.risks.privacy_risk)}">
               </div>
             </div>
             <div class="form-group">
-              <label>Mitigation Strategy</label>
-              <textarea class="step-input-nested" data-parent="risks" data-field="mitigation" aria-label="Mitigation Strategy" rows="2">${escapeHtml(step.risks.mitigation)}</textarea>
+              <label for="step-${sid}-mitigation">Mitigation Strategy</label>
+              <textarea id="step-${sid}-mitigation" class="step-input-nested" data-parent="risks" data-field="mitigation" aria-label="Mitigation Strategy" rows="2">${escapeHtml(step.risks.mitigation)}</textarea>
             </div>
           </div>
 
@@ -1433,11 +1458,13 @@ export class App {
 
     document.querySelectorAll('.edit-step').forEach(btn => {
       btn.addEventListener('click', (e) => {
-        const item = (e.currentTarget as HTMLElement).closest('.step-item');
+        const editBtn = e.currentTarget as HTMLButtonElement;
+        const item = editBtn.closest('.step-item');
         const id = item?.getAttribute('data-id');
         const contentEl = item?.querySelector('.step-content');
         if (contentEl && id) {
           const isNowExpanded = contentEl.classList.toggle('expanded');
+          editBtn.setAttribute('aria-expanded', isNowExpanded ? 'true' : 'false');
           if (isNowExpanded) {
             this.expandedStepIds.add(id);
           } else {
@@ -1532,7 +1559,9 @@ export class App {
         <p style="color: var(--text-secondary); margin-bottom: 24px">Define global governance parameters and step-specific controls.</p>
         
         <div id="governance-steps">
-          ${this.store.steps.map(step => `
+          ${this.store.steps.map(step => {
+            const sid = escapeAttr(step.id);
+            return `
             <div class="step-item">
               <div class="step-header">
                 <span style="font-weight: 600">${escapeHtml(step.name || 'Untitled Step')}</span>
@@ -1541,32 +1570,34 @@ export class App {
               <div class="step-content expanded" style="border-top: 1px solid var(--border-color)">
                 <div class="grid-2">
                   <div class="form-group">
-                    <label>Approval Required</label>
-                    <select class="gov-input" data-id="${escapeAttr(step.id)}" data-field="approval_required" aria-label="Approval Required">
+                    <label for="gov-${sid}-approval_required">Approval Required</label>
+                    <select id="gov-${sid}-approval_required" class="gov-input" data-id="${sid}" data-field="approval_required" aria-label="Approval Required">
                       <option value="false" ${!step.controls.approval_required ? 'selected' : ''}>No</option>
                       <option value="true" ${step.controls.approval_required ? 'selected' : ''}>Yes</option>
                     </select>
                   </div>
                   <div class="form-group">
-                    <label>Review Cycle</label>
-                    <input type="text" class="gov-input" data-id="${escapeAttr(step.id)}" data-field="review_cycle" aria-label="Review Cycle" value="${escapeAttr(step.controls.review_cycle)}" placeholder="e.g. Quarterly">
+                    <label for="gov-${sid}-review_cycle">Review Cycle</label>
+                    <input type="text" id="gov-${sid}-review_cycle" class="gov-input" data-id="${sid}" data-field="review_cycle" aria-label="Review Cycle" value="${escapeAttr(step.controls.review_cycle)}" placeholder="e.g. Quarterly">
                   </div>
                 </div>
                 <div class="form-group">
-                  <label>Escalation Path</label>
-                  <input type="text" class="gov-input" data-id="${escapeAttr(step.id)}" data-field="escalation_path" aria-label="Escalation Path" value="${escapeAttr(step.controls.escalation_path)}" placeholder="Who to contact if risks elevate?">
+                  <label for="gov-${sid}-escalation_path">Escalation Path</label>
+                  <input type="text" id="gov-${sid}-escalation_path" class="gov-input" data-id="${sid}" data-field="escalation_path" aria-label="Escalation Path" value="${escapeAttr(step.controls.escalation_path)}" placeholder="Who to contact if risks elevate?">
                 </div>
               </div>
             </div>
-          `).join('')}
+          `;
+          }).join('')}
         </div>
+        ${this.store.steps.length === 0 ? `<p style="color: var(--text-muted); font-style: italic">No workflow steps defined yet. Add steps in the Step Builder to configure governance controls.</p>` : ''}
       </div>
     `;
   }
 
   private attachGovernanceEvents() {
     document.querySelectorAll('.gov-input').forEach(input => {
-      input.addEventListener('input', (e) => {
+      const handleGovChange = (e: Event) => {
         const target = e.target as HTMLInputElement | HTMLSelectElement;
         const id = target.dataset.id;
         const field = target.dataset.field;
@@ -1579,7 +1610,12 @@ export class App {
           }
           this.saveToStorage();
         }
-      });
+      };
+
+      input.addEventListener('input', handleGovChange);
+      if (input.tagName === 'SELECT') {
+        input.addEventListener('change', handleGovChange);
+      }
     });
   }
 
@@ -1633,7 +1669,7 @@ export class App {
             <span class="metric-title">JSON Specification (Active Workflow)</span>
           </div>
           <p>Export the completed, schema-validated specification of the active workflow for downstream governance tools.</p>
-          <button id="export-json" class="btn btn-primary" aria-label="Export workflow as JSON specification">Export JSON</button>
+          <button type="button" id="export-json" class="btn btn-primary" aria-label="Export workflow as JSON specification">Export JSON</button>
         </div>
 
         <div class="metric-card">
@@ -1641,7 +1677,7 @@ export class App {
             <span class="metric-title">Draft / Recovery JSON (Active Workflow)</span>
           </div>
           <p>Export a lossless working draft of the active workflow at any stage, even if required metadata or step names are incomplete.</p>
-          <button id="export-draft-json" class="btn btn-secondary" aria-label="Export unfinished working draft or recovery JSON">Export Draft / Recovery JSON</button>
+          <button type="button" id="export-draft-json" class="btn btn-secondary" aria-label="Export unfinished working draft or recovery JSON">Export Draft / Recovery JSON</button>
         </div>
 
         <div class="metric-card">
@@ -1650,8 +1686,8 @@ export class App {
           </div>
           <p>Back up or restore the entire local multi-workflow registry (all completed workflows and working drafts). Note: in-browser protective backups hold a single workflow snapshot; download a Full Registry Backup before replacing your registry.</p>
           <div style="display: flex; gap: 8px; flex-wrap: wrap">
-            <button id="export-registry-json" class="btn btn-secondary" aria-label="Export full workflow registry backup as JSON">Export Registry Backup</button>
-            <button id="import-registry-json" class="btn btn-secondary" aria-label="Import workflow registry backup from JSON">Import Registry Backup</button>
+            <button type="button" id="export-registry-json" class="btn btn-secondary" aria-label="Export full workflow registry backup as JSON">Export Registry Backup</button>
+            <button type="button" id="import-registry-json" class="btn btn-secondary" aria-label="Import workflow registry backup from JSON">Import Registry Backup</button>
           </div>
         </div>
 
@@ -1660,15 +1696,15 @@ export class App {
             <span class="metric-title">Markdown Document</span>
           </div>
           <p>Generate a structured governance report in Markdown format for documentation.</p>
-          <button id="export-markdown" class="btn btn-primary" aria-label="Export workflow as Markdown document">Export Markdown</button>
+          <button type="button" id="export-markdown" class="btn btn-primary" aria-label="Export workflow as Markdown document">Export Markdown</button>
         </div>
 
         <div class="metric-card">
           <div class="metric-header">
             <span class="metric-title">Printable Report (PDF)</span>
           </div>
-          <p>Generate a professional, human-readable PDF report of the workflow design.</p>
-          <button id="export-pdf" class="btn btn-primary" aria-label="Export workflow as printable PDF">Export PDF / Print</button>
+          <p>Generate a complete, structured print/PDF governance specification report including metadata, completeness metrics, steps, AI roles, human oversight, risks, controls, reflection, and scope disclaimer.</p>
+          <button type="button" id="export-pdf" class="btn btn-primary" aria-label="Export workflow as printable PDF">Export PDF / Print</button>
         </div>
       </div>
 
@@ -1701,7 +1737,8 @@ export class App {
     });
 
     document.getElementById('export-pdf')?.addEventListener('click', () => {
-      exportToPDF();
+      this.syncPrintableReport();
+      exportToPDF(this.store);
     });
   }
 
@@ -1884,11 +1921,33 @@ export class App {
     input.click();
   }
 
+  private syncPrintableReport() {
+    const contentEl = document.querySelector('.content');
+    if (!contentEl) return;
+
+    let reportEl = document.getElementById('printable-governance-report');
+    if (!reportEl) {
+      reportEl = document.createElement('section');
+      reportEl.id = 'printable-governance-report';
+      reportEl.className = 'printable-report';
+      reportEl.setAttribute('aria-label', 'Printable Governance Specification Report');
+      const footerEl = contentEl.querySelector('.page-footer');
+      if (footerEl) {
+        contentEl.insertBefore(reportEl, footerEl);
+      } else {
+        contentEl.appendChild(reportEl);
+      }
+    }
+
+    reportEl.innerHTML = generatePrintableReportHTML(this.store);
+  }
+
   private render() {
     this.syncRestoreBackupButton();
     this.syncRegistryToolbar();
     this.updateCompletenessUI();
     this.renderView();
+    this.syncPrintableReport();
   }
 }
 
