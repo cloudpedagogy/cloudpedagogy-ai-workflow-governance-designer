@@ -13,11 +13,28 @@ import {
   type WorkflowStore,
   type WorkflowStep
 } from './data/model';
-import { exportToJSON, exportDraftToJSON, exportToMarkdown, exportToPDF } from './utils/export';
+import {
+  exportToJSON,
+  exportDraftToJSON,
+  exportRegistryToJSON,
+  exportToMarkdown,
+  exportToPDF
+} from './utils/export';
 import { generateUUID } from './utils/uuid';
 import { escapeHtml, escapeAttr } from './utils/security';
-import { validateWorkflowImport, validateWorkflowDraft } from './utils/schema';
-import { StorageManager } from './utils/storage';
+import {
+  validateWorkflowImport,
+  validateWorkflowDraft,
+  validateRegistryImport
+} from './utils/schema';
+import { StorageManager, type WorkflowSummary } from './utils/storage';
+
+const STEP_TYPE_LABELS: Record<string, string> = {
+  'human-only': 'Human Only',
+  'ai-supported': 'AI Supported',
+  'ai-generated': 'AI Generated',
+  'decision-point': 'Decision Point'
+};
 
 export class App {
   private store: WorkflowStore = INITIAL_STATE;
@@ -27,6 +44,7 @@ export class App {
   private hasUnsavedChanges: boolean = false;
   private preDemoStore: WorkflowStore | null = null;
   private preDemoHadUnsavedChanges: boolean = false;
+  private expandedStepIds: Set<string> = new Set();
 
   constructor(storageManager?: StorageManager) {
     this.storageManager = storageManager || new StorageManager();
@@ -45,6 +63,13 @@ export class App {
 
   public getHasUnsavedChanges(): boolean {
     return this.hasUnsavedChanges;
+  }
+
+  public listWorkflows(): WorkflowSummary[] {
+    if (!this.isDemoMode) {
+      this.storageManager.syncInMemoryWorkflow(this.store, this.hasUnsavedChanges);
+    }
+    return this.storageManager.listWorkflows();
   }
 
   private loadFromStorage() {
@@ -84,6 +109,7 @@ export class App {
     if (result.success) {
       this.hasUnsavedChanges = false;
       this.updateSaveStatus('saved');
+      this.syncRegistryToolbar();
       return true;
     } else {
       this.hasUnsavedChanges = true;
@@ -91,9 +117,10 @@ export class App {
         this.showCorruptedBanner();
       }
       this.updateSaveStatus('error', result.error);
+      this.syncRegistryToolbar();
       if (isExplicitUserSave) {
         alert(
-          `${result.error}\n\nRecovery Guidance: Open the "Export" tab in the sidebar and click "Export Draft / Recovery JSON" (or "Export JSON") to save your workflow safely.`
+          `${result.error}\n\nRecovery Guidance: Open the "Export" tab in the sidebar and click "Export Draft / Recovery JSON" (or "Export Registry Backup") to save your work safely.`
         );
       }
       return false;
@@ -237,6 +264,268 @@ export class App {
     }
   }
 
+  private syncRegistryToolbar() {
+    const contentEl = document.querySelector('.content');
+    const viewContainer = document.getElementById('view-container');
+    if (!contentEl || !viewContainer) return;
+
+    let toolbar = document.getElementById('workflow-registry-bar');
+    if (!toolbar) {
+      toolbar = document.createElement('div');
+      toolbar.id = 'workflow-registry-bar';
+      toolbar.className = 'workflow-registry-bar';
+      toolbar.setAttribute('role', 'region');
+      toolbar.setAttribute('aria-label', 'Workflow Registry Controls');
+      contentEl.insertBefore(toolbar, viewContainer);
+    }
+
+    if (!this.isDemoMode) {
+      this.storageManager.syncInMemoryWorkflow(this.store, this.hasUnsavedChanges);
+    }
+    const workflows = this.storageManager.listWorkflows();
+    const activeId = this.store.metadata.id;
+
+    toolbar.innerHTML = `
+      <div class="registry-selector-group">
+        <label for="workflow-switcher" class="registry-label">Active Workflow (${workflows.length}):</label>
+        <select id="workflow-switcher" aria-label="Switch active workflow" ${this.isDemoMode ? 'disabled' : ''}>
+          ${workflows
+            .map(wf => {
+              const label = `${wf.title || 'Untitled Workflow'}${wf.hasUnsavedChanges ? ' ● (Unsaved)' : ''}`;
+              const selected = !this.isDemoMode && wf.id === activeId ? 'selected' : '';
+              return `<option value="${escapeAttr(wf.id)}" ${selected}>${escapeHtml(label)}</option>`;
+            })
+            .join('')}
+        </select>
+      </div>
+      <div class="registry-actions-group">
+        <button id="create-workflow-btn" type="button" class="btn btn-secondary btn-sm" aria-label="Create workflow in registry" ${this.isDemoMode ? 'disabled' : ''}>+ Create Workflow</button>
+        <button id="duplicate-workflow-btn" type="button" class="btn btn-secondary btn-sm" aria-label="Duplicate active workflow" ${this.isDemoMode ? 'disabled' : ''}>Duplicate</button>
+        <button id="rename-workflow-btn" type="button" class="btn btn-secondary btn-sm" aria-label="Rename active workflow" ${this.isDemoMode ? 'disabled' : ''}>Rename</button>
+        <button id="delete-workflow-btn" type="button" class="btn btn-secondary btn-sm" aria-label="Delete active workflow" ${this.isDemoMode ? 'disabled' : ''}>Delete</button>
+      </div>
+    `;
+
+    const switcher = document.getElementById('workflow-switcher') as HTMLSelectElement | null;
+    switcher?.addEventListener('change', (e) => {
+      const targetId = (e.target as HTMLSelectElement).value;
+      if (targetId && targetId !== this.store.metadata.id) {
+        this.switchWorkflow(targetId);
+      }
+    });
+
+    document.getElementById('create-workflow-btn')?.addEventListener('click', () => {
+      this.createWorkflowInRegistry();
+    });
+
+    document.getElementById('duplicate-workflow-btn')?.addEventListener('click', () => {
+      this.duplicateCurrentWorkflow();
+    });
+
+    document.getElementById('rename-workflow-btn')?.addEventListener('click', () => {
+      this.renameCurrentWorkflow();
+    });
+
+    document.getElementById('delete-workflow-btn')?.addEventListener('click', () => {
+      this.deleteWorkflowById(this.store.metadata.id);
+    });
+  }
+
+  public createWorkflowInRegistry(initialTitle: string = ''): boolean {
+    if (this.isDemoMode) {
+      alert('Exit Demo Mode first before creating a new workflow in your registry.');
+      return false;
+    }
+
+    if (this.storageManager.isCorruptedStorageLocked()) {
+      this.updateSaveStatus(
+        'error',
+        'Local storage contains unrecovered corrupted data. Resolve or download the corrupted data before modifying the registry.'
+      );
+      alert(
+        'Cannot create workflow: Local storage contains unrecovered corrupted data. Resolve or download the corrupted data first.'
+      );
+      return false;
+    }
+
+    const res = this.storageManager.createWorkflowInRegistry(
+      initialTitle,
+      this.store,
+      this.hasUnsavedChanges
+    );
+    this.store = res.activeWorkflow;
+    this.expandedStepIds.clear();
+
+    if (res.success && res.persisted) {
+      this.hasUnsavedChanges = false;
+      this.updateSaveStatus('saved');
+      this.render();
+      return true;
+    } else {
+      this.hasUnsavedChanges = true;
+      this.updateSaveStatus('error', res.error);
+      this.render();
+      alert(
+        `New workflow created in memory only, as local storage could not be updated:\n${res.error}\n\nUse the "Export" tab to export your work.`
+      );
+      return false;
+    }
+  }
+
+  public switchWorkflow(targetId: string): boolean {
+    if (this.isDemoMode) {
+      alert('Exit Demo Mode before switching between saved workflows.');
+      return false;
+    }
+
+    const res = this.storageManager.switchWorkflow(targetId, this.store, this.hasUnsavedChanges);
+    if (!res.success) {
+      alert(res.error || 'Could not switch to the selected workflow.');
+      return false;
+    }
+
+    this.store = res.activeWorkflow;
+    this.expandedStepIds.clear();
+    this.hasUnsavedChanges = Boolean(res.hasUnsavedChanges);
+
+    if (this.hasUnsavedChanges) {
+      if (res.error) {
+        this.updateSaveStatus('error', res.error);
+      } else {
+        this.updateSaveStatus('unsaved');
+      }
+    } else {
+      this.updateSaveStatus('saved');
+    }
+
+    this.render();
+    return true;
+  }
+
+  public duplicateCurrentWorkflow(): boolean {
+    if (this.isDemoMode) {
+      return this.saveDemoAsMyWorkflow();
+    }
+
+    if (this.storageManager.isCorruptedStorageLocked()) {
+      this.updateSaveStatus(
+        'error',
+        'Local storage contains unrecovered corrupted data. Resolve or download the corrupted data before duplicating.'
+      );
+      alert('Cannot duplicate workflow while corrupted storage data is locked.');
+      return false;
+    }
+
+    const res = this.storageManager.duplicateWorkflow(
+      this.store.metadata.id,
+      this.store,
+      this.hasUnsavedChanges
+    );
+
+    if (!res.success) {
+      this.updateSaveStatus('error', res.error);
+      alert(
+        `Failed to duplicate workflow in local storage:\n${res.error}\n\nYour current workflow remains untouched.`
+      );
+      return false;
+    }
+
+    this.store = res.activeWorkflow;
+    this.expandedStepIds.clear();
+    this.hasUnsavedChanges = false;
+    this.updateSaveStatus('saved');
+    this.render();
+    return true;
+  }
+
+  public renameCurrentWorkflow(providedTitle?: string): boolean {
+    if (this.isDemoMode) {
+      alert('Exit Demo Mode or save the demo as your own workflow before renaming.');
+      return false;
+    }
+
+    let nextTitle = providedTitle;
+    if (nextTitle === undefined) {
+      const prompted =
+        typeof window !== 'undefined' && typeof window.prompt === 'function'
+          ? window.prompt('Enter a new title for this workflow:', this.store.metadata.title || '')
+          : null;
+      if (prompted === null) {
+        return false;
+      }
+      nextTitle = prompted;
+    }
+
+    const trimmed = nextTitle.trim();
+    if (!trimmed) {
+      alert('Workflow title cannot be empty when renaming.');
+      return false;
+    }
+
+    const res = this.storageManager.renameWorkflow(
+      this.store.metadata.id,
+      trimmed,
+      this.store,
+      this.hasUnsavedChanges
+    );
+
+    if (!res.success) {
+      this.updateSaveStatus('error', res.error);
+      alert(`Failed to rename workflow in local storage:\n${res.error}`);
+      return false;
+    }
+
+    this.store = res.activeWorkflow;
+    this.hasUnsavedChanges = Boolean(res.hasUnsavedChanges);
+    this.updateSaveStatus(this.hasUnsavedChanges ? 'unsaved' : 'saved');
+    this.render();
+    return true;
+  }
+
+  public deleteWorkflowById(targetId?: string): boolean {
+    if (this.isDemoMode) {
+      alert('Exit Demo Mode before deleting workflows from your registry.');
+      return false;
+    }
+
+    const idToDelete = targetId || this.store.metadata.id;
+    const targetWf =
+      idToDelete === this.store.metadata.id
+        ? this.store
+        : this.storageManager.getWorkflowById(idToDelete);
+
+    if (!targetWf) {
+      alert('Workflow not found in registry.');
+      return false;
+    }
+
+    const titleDisplay = targetWf.metadata.title || 'Untitled Workflow';
+    if (
+      !confirm(
+        `Delete workflow "${titleDisplay}" from the registry? A protective backup of this workflow will be created first.`
+      )
+    ) {
+      return false;
+    }
+
+    const res = this.storageManager.deleteWorkflow(idToDelete, this.store, this.hasUnsavedChanges);
+    if (!res.success) {
+      this.updateSaveStatus('error', res.error);
+      this.syncRestoreBackupButton();
+      alert(
+        `Cannot delete workflow "${titleDisplay}":\n${res.error}\n\nYour workflow has been preserved.`
+      );
+      return false;
+    }
+
+    this.store = res.activeWorkflow;
+    this.expandedStepIds.clear();
+    this.hasUnsavedChanges = Boolean(res.hasUnsavedChanges);
+    this.updateSaveStatus(this.hasUnsavedChanges ? 'unsaved' : 'saved');
+    this.render();
+    return true;
+  }
+
   public restoreFromBackup(): boolean {
     if (!this.storageManager.hasProtectiveBackup()) {
       alert('No valid protective backup is available to restore.');
@@ -266,6 +555,7 @@ export class App {
       this.hideDemoBanner();
       this.hideCorruptedBanner();
       this.store = restoreResult.data;
+      this.expandedStepIds.clear();
       this.hasUnsavedChanges = false;
       this.updateSaveStatus('saved');
       this.render();
@@ -284,6 +574,7 @@ export class App {
     }
 
     this.store = restoreResult.data;
+    this.expandedStepIds.clear();
     this.isDemoMode = false;
     this.preDemoStore = null;
     this.preDemoHadUnsavedChanges = false;
@@ -387,9 +678,7 @@ export class App {
       );
       return true;
     } else {
-      // Roll back protective backup to previousBackup if one existed prior to this failed save
       const rollback = this.storageManager.rollbackProtectiveBackup(backupResult.previousBackup);
-      // Keep demo mode, preDemoStore, preDemoHadUnsavedChanges, and #demo-banner intact!
       this.hasUnsavedChanges = true;
       this.updateSaveStatus('error', saveResult.error);
       this.syncRestoreBackupButton();
@@ -421,6 +710,7 @@ export class App {
       this.hasUnsavedChanges = this.preDemoHadUnsavedChanges;
       this.preDemoStore = null;
       this.preDemoHadUnsavedChanges = false;
+      this.storageManager.syncInMemoryWorkflow(this.store, this.hasUnsavedChanges);
 
       if (this.storageManager.isCorruptedStorageLocked()) {
         this.showCorruptedBanner();
@@ -473,6 +763,7 @@ export class App {
 
       if (confirm(promptMsg)) {
         if (!this.isDemoMode) {
+          this.storageManager.syncInMemoryWorkflow(this.store, this.hasUnsavedChanges);
           this.preDemoStore = JSON.parse(JSON.stringify(this.store));
           this.preDemoHadUnsavedChanges = this.hasUnsavedChanges;
         }
@@ -543,6 +834,7 @@ export class App {
       }
 
       this.store = newStore;
+      this.expandedStepIds.clear();
       this.isDemoMode = false;
       this.preDemoStore = null;
       this.preDemoHadUnsavedChanges = false;
@@ -814,31 +1106,59 @@ export class App {
     `;
   }
 
-  private renderStepItem(step: WorkflowStep, index: number, isHighRisk: boolean = false, hasGaps: boolean = false) {
-    const types: Record<string, string> = {
-      'human-only': 'Human Only',
-      'ai-supported': 'AI Supported',
-      'ai-generated': 'AI Generated',
-      'decision-point': 'Decision Point'
-    };
+  private renderStepHeaderBadgesHtml(step: WorkflowStep, index: number): string {
+    const isHighRisk = isHighRiskStep(step);
+    const hasGaps =
+      (step.type === 'ai-generated' || step.type === 'ai-supported') &&
+      step.human_oversight.oversight_level === 'none';
+    const isUnapprovedDecision = step.type === 'decision-point' && !step.controls.approval_required;
+    const isApprovedDecision = step.type === 'decision-point' && Boolean(step.controls.approval_required);
+
+    return `
+      <span class="step-number" style="font-weight: 700; color: var(--text-muted)">${index + 1}</span>
+      <span class="step-title-text" style="font-weight: 600">${escapeHtml(step.name || 'Untitled Step')}</span>
+      <span class="step-type-pill">${escapeHtml(STEP_TYPE_LABELS[step.type] || step.type)}</span>
+      ${isHighRisk ? '<span class="step-type-pill badge-high-risk" style="background: #FEE2E2; color: #991B1B; border: 1px solid #FECACA">⚠️ High Risk</span>' : ''}
+      ${step.human_oversight.intervention_points ? '<span class="step-type-pill badge-intervention" style="background: #E0F2FE; color: #075985; border: 1px solid #BAE6FD">🔗 Intervention Pt</span>' : ''}
+      ${hasGaps ? '<span class="step-type-pill badge-missing-oversight" style="background: #FFFBEB; color: #92400E; border: 1px solid #FDE68A">❗ Missing Oversight</span>' : ''}
+      ${isUnapprovedDecision ? '<span class="step-type-pill badge-decision-warning" style="background: #FFFBEB; color: #92400E; border: 1px solid #FDE68A">⚠️ Approval Unset</span>' : ''}
+      ${isApprovedDecision ? '<span class="step-type-pill badge-decision-approved" style="background: #ECFDF5; color: #065F46; border: 1px solid #A7F3D0">✓ Decision Record</span>' : ''}
+    `;
+  }
+
+  private renderDecisionPointControlsHtml(step: WorkflowStep): string {
+    return `
+      <div class="governance-controls" style="border-top: 1px solid var(--border-color); margin-top: 16px; padding-top: 16px">
+        <h4>Decision Point Controls</h4>
+        <div class="form-group">
+          <label style="display: flex; align-items: center; gap: 8px; cursor: pointer">
+            <input type="checkbox" class="step-checkbox-nested" data-parent="controls" data-field="approval_required" aria-label="Decision Record Required" ${step.controls.approval_required ? 'checked' : ''} style="width: auto">
+            Decision Record Required (Human-AI Decision Record Tool)
+          </label>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderStepItem(step: WorkflowStep, index: number, _isHighRisk: boolean = false, _hasGaps: boolean = false) {
+    const isExpanded = this.expandedStepIds.has(step.id);
+    const totalSteps = this.store.steps.length;
+    const stepLabel = escapeAttr(step.name || 'Untitled');
 
     return `
       <div class="step-item" data-id="${escapeAttr(step.id)}">
         <div class="step-header">
-          <div style="display: flex; align-items: center; gap: 16px">
-            <span class="step-number" style="font-weight: 700; color: var(--text-muted)">${index + 1}</span>
-            <span style="font-weight: 600">${escapeHtml(step.name || 'Untitled Step')}</span>
-            <span class="step-type-pill">${escapeHtml(types[step.type] || step.type)}</span>
-            ${isHighRisk ? '<span class="step-type-pill" style="background: #FEE2E2; color: #991B1B; border: 1px solid #FECACA">⚠️ High Risk</span>' : ''}
-            ${step.human_oversight.intervention_points ? '<span class="step-type-pill" style="background: #E0F2FE; color: #075985; border: 1px solid #BAE6FD">🔗 Intervention Pt</span>' : ''}
-            ${hasGaps ? '<span class="step-type-pill" style="background: #FFFBEB; color: #92400E; border: 1px solid #FDE68A">❗ Missing Oversight</span>' : ''}
+          <div class="step-header-badges" style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap">
+            ${this.renderStepHeaderBadgesHtml(step, index)}
           </div>
-          <div style="display: flex; gap: 8px">
-            <button class="btn btn-secondary btn-sm edit-step" aria-label="Edit step ${index + 1}: ${escapeAttr(step.name || 'Untitled')}">Edit</button>
-            <button class="btn btn-secondary btn-sm delete-step" aria-label="Delete step ${index + 1}: ${escapeAttr(step.name || 'Untitled')}">Delete</button>
+          <div class="step-header-actions" style="display: flex; gap: 8px; align-items: center">
+            <button type="button" class="btn btn-secondary btn-sm move-step-up" aria-label="Move step ${index + 1}: ${stepLabel} up" ${index === 0 ? 'disabled' : ''}>↑ Move Up</button>
+            <button type="button" class="btn btn-secondary btn-sm move-step-down" aria-label="Move step ${index + 1}: ${stepLabel} down" ${index === totalSteps - 1 ? 'disabled' : ''}>↓ Move Down</button>
+            <button type="button" class="btn btn-secondary btn-sm edit-step" aria-label="Edit step ${index + 1}: ${stepLabel}">Edit</button>
+            <button type="button" class="btn btn-secondary btn-sm delete-step" aria-label="Delete step ${index + 1}: ${stepLabel}">Delete</button>
           </div>
         </div>
-        <div class="step-content">
+        <div class="step-content${isExpanded ? ' expanded' : ''}">
           <div class="grid-2">
             <div class="form-group">
               <label>Step Name</label>
@@ -871,8 +1191,27 @@ export class App {
             </div>
           </div>
 
+          <div class="ai-involvement-layer" style="border-top: 1px solid var(--border-color); margin-top: 16px; padding-top: 16px">
+            <h4>AI Involvement &amp; Reliance</h4>
+            <div class="grid-2">
+              <div class="form-group">
+                <label>AI Role / Function</label>
+                <input type="text" class="step-input-nested" data-parent="ai_involvement" data-field="ai_role" aria-label="AI Role" value="${escapeAttr(step.ai_involvement.ai_role)}" placeholder="e.g. Drafts synthesis, classifies records">
+              </div>
+              <div class="form-group">
+                <label>AI Reliance Level</label>
+                <select class="step-input-nested" data-parent="ai_involvement" data-field="reliance_level" aria-label="AI Reliance Level">
+                  <option value="low" ${step.ai_involvement.reliance_level === 'low' ? 'selected' : ''}>Low</option>
+                  <option value="medium" ${step.ai_involvement.reliance_level === 'medium' ? 'selected' : ''}>Medium</option>
+                  <option value="high" ${step.ai_involvement.reliance_level === 'high' ? 'selected' : ''}>High</option>
+                  <option value="critical" ${step.ai_involvement.reliance_level === 'critical' ? 'selected' : ''}>Critical</option>
+                </select>
+              </div>
+            </div>
+          </div>
+
           <div class="human-ai-boundary" style="border-top: 1px solid var(--border-color); margin-top: 16px; padding-top: 16px">
-            <h4>Human-AI Boundary & Oversight</h4>
+            <h4>Human-AI Boundary &amp; Oversight</h4>
             <div class="grid-2">
               <div class="form-group">
                 <label>Responsible Role</label>
@@ -906,26 +1245,136 @@ export class App {
                 <input type="text" class="step-input-nested" data-parent="risks" data-field="operational_risk" aria-label="Operational Risk" value="${escapeAttr(step.risks.operational_risk)}">
               </div>
             </div>
-             <div class="form-group">
+            <div class="grid-2">
+              <div class="form-group">
+                <label>Ethical Risk</label>
+                <input type="text" class="step-input-nested" data-parent="risks" data-field="ethical_risk" aria-label="Ethical Risk" value="${escapeAttr(step.risks.ethical_risk)}">
+              </div>
+              <div class="form-group">
+                <label>Privacy / Data Risk</label>
+                <input type="text" class="step-input-nested" data-parent="risks" data-field="privacy_risk" aria-label="Privacy Risk" value="${escapeAttr(step.risks.privacy_risk)}">
+              </div>
+            </div>
+            <div class="form-group">
               <label>Mitigation Strategy</label>
               <textarea class="step-input-nested" data-parent="risks" data-field="mitigation" aria-label="Mitigation Strategy" rows="2">${escapeHtml(step.risks.mitigation)}</textarea>
             </div>
           </div>
 
-          ${step.type === 'decision-point' ? `
-            <div class="governance-controls" style="border-top: 1px solid var(--border-color); margin-top: 16px; padding-top: 16px">
-              <h4>Decision Point Controls</h4>
-              <div class="form-group">
-                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer">
-                  <input type="checkbox" class="step-checkbox-nested" data-parent="controls" data-field="approval_required" aria-label="Decision Record Required" ${step.controls.approval_required ? 'checked' : ''} style="width: auto">
-                  Decision Record Required (Human-AI Decision Record Tool)
-                </label>
-              </div>
-            </div>
-          ` : ''}
+          ${step.type === 'decision-point' ? this.renderDecisionPointControlsHtml(step) : ''}
         </div>
       </div>
     `;
+  }
+
+  /**
+   * Targeted DOM update for a single step item so changing step type (to/from decision-point),
+   * step name, reliance level, oversight level, intervention points, or decision-record checkbox
+   * immediately updates badges, aria-labels, and decision-point controls without full-view rerendering
+   * or disrupting keyboard focus.
+   */
+  private updateStepItemDOM(stepEl: HTMLElement, step: WorkflowStep, index: number) {
+    const badgesContainer = stepEl.querySelector('.step-header-badges');
+    if (badgesContainer) {
+      badgesContainer.innerHTML = this.renderStepHeaderBadgesHtml(step, index);
+    }
+
+    const nameForAria = step.name || 'Untitled';
+    const upBtn = stepEl.querySelector('.move-step-up');
+    const downBtn = stepEl.querySelector('.move-step-down');
+    const editBtn = stepEl.querySelector('.edit-step');
+    const deleteBtn = stepEl.querySelector('.delete-step');
+
+    upBtn?.setAttribute('aria-label', `Move step ${index + 1}: ${nameForAria} up`);
+    downBtn?.setAttribute('aria-label', `Move step ${index + 1}: ${nameForAria} down`);
+    editBtn?.setAttribute('aria-label', `Edit step ${index + 1}: ${nameForAria}`);
+    deleteBtn?.setAttribute('aria-label', `Delete step ${index + 1}: ${nameForAria}`);
+
+    const stepContent = stepEl.querySelector('.step-content');
+    if (!stepContent) return;
+
+    const existingDecisionControls = stepContent.querySelector('.governance-controls');
+    if (step.type === 'decision-point') {
+      if (!existingDecisionControls) {
+        const wrapper = document.createElement('div');
+        wrapper.innerHTML = this.renderDecisionPointControlsHtml(step).trim();
+        const newControlsEl = wrapper.firstElementChild as HTMLElement | null;
+        if (newControlsEl) {
+          stepContent.appendChild(newControlsEl);
+          const checkbox = newControlsEl.querySelector('.step-checkbox-nested') as HTMLInputElement | null;
+          if (checkbox) {
+            this.bindStepCheckboxEvent(checkbox);
+          }
+        }
+      } else {
+        const checkbox = existingDecisionControls.querySelector(
+          'input[data-field="approval_required"]'
+        ) as HTMLInputElement | null;
+        if (checkbox) {
+          checkbox.checked = Boolean(step.controls.approval_required);
+        }
+      }
+    } else if (existingDecisionControls) {
+      existingDecisionControls.remove();
+    }
+  }
+
+  private bindStepCheckboxEvent(checkbox: HTMLInputElement) {
+    checkbox.addEventListener('change', (e) => {
+      const target = e.target as HTMLInputElement;
+      const stepEl = target.closest('.step-item') as HTMLElement | null;
+      const id = stepEl?.getAttribute('data-id');
+      const parent = target.dataset.parent as any;
+      const field = target.dataset.field as any;
+      const index = this.store.steps.findIndex(s => s.id === id);
+      const step = index >= 0 ? this.store.steps[index] : undefined;
+
+      if (step && (step as any)[parent]) {
+        (step as any)[parent][field] = target.checked;
+        if (stepEl) {
+          this.updateStepItemDOM(stepEl, step, index);
+        }
+        this.saveToStorage();
+      }
+    });
+  }
+
+  public moveStep(fromIndex: number, toIndex: number, direction?: 'up' | 'down'): boolean {
+    if (
+      fromIndex < 0 ||
+      fromIndex >= this.store.steps.length ||
+      toIndex < 0 ||
+      toIndex >= this.store.steps.length ||
+      fromIndex === toIndex
+    ) {
+      return false;
+    }
+
+    const [movedStep] = this.store.steps.splice(fromIndex, 1);
+    this.store.steps.splice(toIndex, 0, movedStep);
+    this.saveToStorage();
+    this.render();
+
+    // Restore keyboard focus to the moved step's reorder button (or fallback control at boundary)
+    const movedStepEl = document.querySelector(
+      `.step-item[data-id="${movedStep.id}"]`
+    ) as HTMLElement | null;
+    if (movedStepEl) {
+      const preferredSelector = direction === 'down' ? '.move-step-down' : '.move-step-up';
+      const fallbackSelector = direction === 'down' ? '.move-step-up' : '.move-step-down';
+      const preferredBtn = movedStepEl.querySelector(preferredSelector) as HTMLButtonElement | null;
+      const fallbackBtn = movedStepEl.querySelector(fallbackSelector) as HTMLButtonElement | null;
+      const editBtn = movedStepEl.querySelector('.edit-step') as HTMLButtonElement | null;
+
+      if (preferredBtn && !preferredBtn.disabled) {
+        preferredBtn.focus();
+      } else if (fallbackBtn && !fallbackBtn.disabled) {
+        fallbackBtn.focus();
+      } else {
+        editBtn?.focus();
+      }
+    }
+    return true;
   }
 
   private attachStepEvents() {
@@ -942,15 +1391,50 @@ export class App {
         risks: { bias_risk: '', operational_risk: '', ethical_risk: '', privacy_risk: '', mitigation: '' },
         controls: { approval_required: false, escalation_path: '', review_cycle: '' }
       };
+      this.expandedStepIds.add(newStep.id);
       this.store.steps.push(newStep);
       this.saveToStorage();
       this.render();
+
+      const newStepNameInput = document.querySelector(
+        `.step-item[data-id="${newStep.id}"] input.step-input[data-field="name"]`
+      ) as HTMLInputElement | null;
+      newStepNameInput?.focus();
+    });
+
+    document.querySelectorAll('.move-step-up').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const id = (e.currentTarget as HTMLElement).closest('.step-item')?.getAttribute('data-id');
+        const idx = this.store.steps.findIndex(s => s.id === id);
+        if (idx > 0) {
+          this.moveStep(idx, idx - 1, 'up');
+        }
+      });
+    });
+
+    document.querySelectorAll('.move-step-down').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        const id = (e.currentTarget as HTMLElement).closest('.step-item')?.getAttribute('data-id');
+        const idx = this.store.steps.findIndex(s => s.id === id);
+        if (idx >= 0 && idx < this.store.steps.length - 1) {
+          this.moveStep(idx, idx + 1, 'down');
+        }
+      });
     });
 
     document.querySelectorAll('.edit-step').forEach(btn => {
       btn.addEventListener('click', (e) => {
         const item = (e.currentTarget as HTMLElement).closest('.step-item');
-        item?.querySelector('.step-content')?.classList.toggle('expanded');
+        const id = item?.getAttribute('data-id');
+        const contentEl = item?.querySelector('.step-content');
+        if (contentEl && id) {
+          const isNowExpanded = contentEl.classList.toggle('expanded');
+          if (isNowExpanded) {
+            this.expandedStepIds.add(id);
+          } else {
+            this.expandedStepIds.delete(id);
+          }
+        }
       });
     });
 
@@ -958,6 +1442,9 @@ export class App {
       btn.addEventListener('click', (e) => {
         const id = (e.currentTarget as HTMLElement).closest('.step-item')?.getAttribute('data-id');
         if (confirm('Delete this step?')) {
+          if (id) {
+            this.expandedStepIds.delete(id);
+          }
           this.store.steps = this.store.steps.filter(s => s.id !== id);
           this.saveToStorage();
           this.render();
@@ -966,51 +1453,66 @@ export class App {
     });
 
     document.querySelectorAll('.step-input').forEach(input => {
-      input.addEventListener('input', (e) => {
+      const handleStepFieldChange = (e: Event) => {
         const target = e.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
-        const id = target.closest('.step-item')?.getAttribute('data-id');
+        const stepEl = target.closest('.step-item') as HTMLElement | null;
+        const id = stepEl?.getAttribute('data-id');
         const field = target.dataset.field as any;
-        const step = this.store.steps.find(s => s.id === id);
+        const index = this.store.steps.findIndex(s => s.id === id);
+        const step = index >= 0 ? this.store.steps[index] : undefined;
 
         if (step) {
           if (field === 'inputs' || field === 'outputs') {
-            (step as any)[field] = target.value.split(',').map(s => s.trim()).filter(Boolean);
+            (step as any)[field] = target.value
+              .split(',')
+              .map(s => s.trim())
+              .filter(s => s.length > 0);
           } else {
             (step as any)[field] = target.value;
           }
+          if (stepEl && (field === 'name' || field === 'type')) {
+            this.updateStepItemDOM(stepEl, step, index);
+          }
           this.saveToStorage();
         }
-      });
+      };
+
+      input.addEventListener('input', handleStepFieldChange);
+      if (input.tagName === 'SELECT') {
+        input.addEventListener('change', handleStepFieldChange);
+      }
     });
 
     document.querySelectorAll('.step-input-nested').forEach(input => {
-      input.addEventListener('input', (e) => {
+      const handleNestedFieldChange = (e: Event) => {
         const target = e.target as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
-        const id = target.closest('.step-item')?.getAttribute('data-id');
+        const stepEl = target.closest('.step-item') as HTMLElement | null;
+        const id = stepEl?.getAttribute('data-id');
         const parent = target.dataset.parent as any;
         const field = target.dataset.field as any;
-        const step = this.store.steps.find(s => s.id === id);
+        const index = this.store.steps.findIndex(s => s.id === id);
+        const step = index >= 0 ? this.store.steps[index] : undefined;
 
         if (step && (step as any)[parent]) {
           (step as any)[parent][field] = target.value;
+          if (
+            stepEl &&
+            (field === 'reliance_level' || field === 'oversight_level' || field === 'intervention_points')
+          ) {
+            this.updateStepItemDOM(stepEl, step, index);
+          }
           this.saveToStorage();
         }
-      });
+      };
+
+      input.addEventListener('input', handleNestedFieldChange);
+      if (input.tagName === 'SELECT') {
+        input.addEventListener('change', handleNestedFieldChange);
+      }
     });
 
     document.querySelectorAll('.step-checkbox-nested').forEach(input => {
-      input.addEventListener('change', (e) => {
-        const target = e.target as HTMLInputElement;
-        const id = target.closest('.step-item')?.getAttribute('data-id');
-        const parent = target.dataset.parent as any;
-        const field = target.dataset.field as any;
-        const step = this.store.steps.find(s => s.id === id);
-
-        if (step && (step as any)[parent]) {
-          (step as any)[parent][field] = target.checked;
-          this.saveToStorage();
-        }
-      });
+      this.bindStepCheckboxEvent(input as HTMLInputElement);
     });
   }
 
@@ -1114,22 +1616,34 @@ export class App {
   }
 
   private renderExportPanel() {
+    const workflowCount = this.listWorkflows().length;
     return `
       <div class="dash-grid">
         <div class="metric-card">
           <div class="metric-header">
-            <span class="metric-title">JSON Specification</span>
+            <span class="metric-title">JSON Specification (Active Workflow)</span>
           </div>
-          <p>Export the full machine-readable workflow specification for integration or governance validation.</p>
+          <p>Export the completed, schema-validated specification of the active workflow for downstream governance tools.</p>
           <button id="export-json" class="btn btn-primary" aria-label="Export workflow as JSON specification">Export JSON</button>
         </div>
 
         <div class="metric-card">
           <div class="metric-header">
-            <span class="metric-title">Draft / Recovery JSON</span>
+            <span class="metric-title">Draft / Recovery JSON (Active Workflow)</span>
           </div>
-          <p>Export a lossless working draft at any stage, even if required metadata or step names are still incomplete.</p>
+          <p>Export a lossless working draft of the active workflow at any stage, even if required metadata or step names are incomplete.</p>
           <button id="export-draft-json" class="btn btn-secondary" aria-label="Export unfinished working draft or recovery JSON">Export Draft / Recovery JSON</button>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-header">
+            <span class="metric-title">Full Registry Backup (${workflowCount} Workflow${workflowCount === 1 ? '' : 's'})</span>
+          </div>
+          <p>Back up or restore the entire local multi-workflow registry (all completed workflows and working drafts). Note: in-browser protective backups hold a single workflow snapshot; download a Full Registry Backup before replacing your registry.</p>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap">
+            <button id="export-registry-json" class="btn btn-secondary" aria-label="Export full workflow registry backup as JSON">Export Registry Backup</button>
+            <button id="import-registry-json" class="btn btn-secondary" aria-label="Import workflow registry backup from JSON">Import Registry Backup</button>
+          </div>
         </div>
 
         <div class="metric-card">
@@ -1165,6 +1679,14 @@ export class App {
       exportDraftToJSON(this.store);
     });
 
+    document.getElementById('export-registry-json')?.addEventListener('click', () => {
+      this.exportRegistryBackup();
+    });
+
+    document.getElementById('import-registry-json')?.addEventListener('click', () => {
+      this.importRegistryJSON();
+    });
+
     document.getElementById('export-markdown')?.addEventListener('click', () => {
       exportToMarkdown(this.store);
     });
@@ -1172,6 +1694,82 @@ export class App {
     document.getElementById('export-pdf')?.addEventListener('click', () => {
       exportToPDF();
     });
+  }
+
+  public exportRegistryBackup(): string {
+    if (!this.isDemoMode) {
+      this.storageManager.syncInMemoryWorkflow(this.store, this.hasUnsavedChanges);
+    }
+    const snapshot = this.storageManager.getRegistrySnapshot();
+    return exportRegistryToJSON(snapshot);
+  }
+
+  public importRegistryContent(content: string): boolean {
+    const validation = validateRegistryImport(content);
+    if (!validation.valid || !validation.registry) {
+      alert(
+        `Registry Import Rejected — Malformed or Incompatible Registry JSON:\n\n• ${validation.errors.join('\n• ')}\n\nYour existing workflow registry has NOT been modified.`
+      );
+      return false;
+    }
+
+    if (validation.warnings.length > 0) {
+      const proceedWithWarnings = confirm(
+        `Registry Import Warnings:\n• ${validation.warnings.join('\n• ')}\n\nDo you want to proceed?`
+      );
+      if (!proceedWithWarnings) return false;
+    }
+
+    const existingList = this.listWorkflows();
+    const incomingCount = validation.registry.workflow_order.length;
+    const confirmReplace = confirm(
+      `Import registry backup containing ${incomingCount} workflow(s)?\n\nThis will replace your current local registry (${existingList.length} workflow(s)). Note: the in-browser protective backup slot preserves only the current active workflow; if you have multiple workflows you wish to keep, cancel and click "Export Registry Backup" first.`
+    );
+    if (!confirmReplace) {
+      return false;
+    }
+
+    const backupTarget = this.isDemoMode && this.preDemoStore ? this.preDemoStore : this.store;
+    const replaceRes = this.storageManager.replaceRegistry(validation.registry, backupTarget);
+
+    if (!replaceRes.success) {
+      this.updateSaveStatus('error', replaceRes.error);
+      this.syncRestoreBackupButton();
+      alert(
+        `Registry Import Aborted:\n${replaceRes.error}\n\nYour existing workflows have been preserved.`
+      );
+      return false;
+    }
+
+    this.store = replaceRes.activeWorkflow;
+    this.expandedStepIds.clear();
+    this.isDemoMode = false;
+    this.preDemoStore = null;
+    this.preDemoHadUnsavedChanges = false;
+    this.hasUnsavedChanges = false;
+    this.hideDemoBanner();
+    this.updateSaveStatus('saved');
+    this.render();
+    alert(`Successfully imported workflow registry (${incomingCount} workflow(s)).`);
+    return true;
+  }
+
+  private importRegistryJSON() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json,application/json';
+    input.onchange = (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = (re) => {
+        const content = re.target?.result as string;
+        this.importRegistryContent(content);
+      };
+      reader.readAsText(file);
+    };
+    input.click();
   }
 
   public importWorkflowContent(content: string): boolean {
@@ -1239,6 +1837,7 @@ export class App {
 
     // 5. Safely apply imported workflow
     this.store = importedStore;
+    this.expandedStepIds.clear();
     this.isDemoMode = false;
     this.preDemoStore = null;
     this.preDemoHadUnsavedChanges = false;
@@ -1271,6 +1870,7 @@ export class App {
 
   private render() {
     this.syncRestoreBackupButton();
+    this.syncRegistryToolbar();
     this.updateCompletenessUI();
     this.renderView();
   }

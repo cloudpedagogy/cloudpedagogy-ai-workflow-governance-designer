@@ -255,6 +255,52 @@ h1 {
   font-size: var(--font-size-meta);
 }
 
+button:disabled,
+select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Multi-Workflow Registry Bar */
+.workflow-registry-bar {
+  padding: 10px 40px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.registry-selector-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 260px;
+}
+
+.registry-label {
+  margin-bottom: 0;
+  white-space: nowrap;
+  font-size: var(--font-size-meta);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.registry-selector-group select {
+  max-width: 360px;
+  padding: 6px 10px;
+  font-size: var(--font-size-meta);
+}
+
+.registry-actions-group {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 /* Cards & Sections */
 .section {
   background: white;
@@ -521,7 +567,7 @@ input:focus, textarea:focus, select:focus, button:focus-visible {
 
 /* Print Styles */
 @media print {
-  .sidebar, .top-bar, .top-actions, .section-actions, .btn, #demo-banner, #corrupted-storage-banner {
+  .sidebar, .top-bar, .top-actions, .workflow-registry-bar, .section-actions, .btn, #demo-banner, #corrupted-storage-banner {
     display: none !important;
   }
   

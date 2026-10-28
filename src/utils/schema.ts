@@ -13,6 +13,8 @@ import { generateUUID } from './uuid';
 
 export const SCHEMA_VERSION = '1.0.0';
 export const SCHEMA_DRAFT_URL = 'http://json-schema.org/draft-07/schema#';
+export const REGISTRY_VERSION = '1.0.0';
+export const REGISTRY_FORMAT = 'cloudpedagogy_workflow_registry';
 
 export interface ValidationResult {
   valid: boolean;
@@ -24,6 +26,22 @@ export interface ValidationResult {
 
 export interface ValidationOptions {
   allowDraft?: boolean;
+}
+
+export interface WorkflowRegistry {
+  format: string;
+  registry_version: string;
+  updated_at: string;
+  active_workflow_id: string;
+  workflow_order: string[];
+  workflows: Record<string, WorkflowStore>;
+}
+
+export interface RegistryValidationResult {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+  registry?: WorkflowRegistry;
 }
 
 const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
@@ -153,8 +171,12 @@ export function mapStoreToSchema(store: WorkflowStore): Record<string, any> {
       step_name: step.name || '',
       step_type: step.type || 'human-only',
       description: step.description || '',
-      inputs: Array.isArray(step.inputs) ? [...step.inputs] : [],
-      outputs: Array.isArray(step.outputs) ? [...step.outputs] : [],
+      inputs: Array.isArray(step.inputs)
+        ? step.inputs.map(s => safeString(s).trim()).filter(s => s.length > 0)
+        : [],
+      outputs: Array.isArray(step.outputs)
+        ? step.outputs.map(s => safeString(s).trim()).filter(s => s.length > 0)
+        : [],
       ai_involvement: {
         ai_role: step.ai_involvement?.ai_role || '',
         reliance_level: step.ai_involvement?.reliance_level || 'low',
@@ -350,10 +372,16 @@ export function mapSchemaToStore(raw: any): WorkflowStore {
       type: resolvedType,
       description: safeString(step.description, ''),
       inputs: Array.isArray(step.inputs)
-        ? step.inputs.filter((v: unknown) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean').map((v: unknown) => safeString(v))
+        ? step.inputs
+            .filter((v: unknown) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')
+            .map((v: unknown) => safeString(v).trim())
+            .filter((s: string) => s.length > 0)
         : [],
       outputs: Array.isArray(step.outputs)
-        ? step.outputs.filter((v: unknown) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean').map((v: unknown) => safeString(v))
+        ? step.outputs
+            .filter((v: unknown) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')
+            .map((v: unknown) => safeString(v).trim())
+            .filter((s: string) => s.length > 0)
         : [],
       ai_involvement: {
         ai_role: safeString(aiInvolvementRaw.ai_role, ''),
@@ -729,4 +757,192 @@ export function validateWorkflowImport(
  */
 export function validateWorkflowDraft(input: unknown): ValidationResult {
   return validateWorkflowImport(input, { allowDraft: true });
+}
+
+/**
+ * Serializes a WorkflowRegistry into a schema-aware full-registry backup payload,
+ * preserving workflow IDs, step IDs, drafts, and unknown extension properties.
+ */
+export function mapRegistryToExportPayload(registry: WorkflowRegistry): Record<string, any> {
+  const exportedWorkflows: Record<string, any> = {};
+  const order = Array.isArray(registry.workflow_order) ? [...registry.workflow_order] : [];
+
+  for (const [id, wf] of Object.entries(registry.workflows || {})) {
+    if (!DANGEROUS_KEYS.has(id) && wf) {
+      const copy: WorkflowStore = JSON.parse(JSON.stringify(wf));
+      if (!copy.metadata) {
+        (copy as any).metadata = { id };
+      } else if (!copy.metadata.id) {
+        copy.metadata.id = id;
+      }
+      exportedWorkflows[id] = mapStoreToSchema(copy);
+      if (!order.includes(id)) {
+        order.push(id);
+      }
+    }
+  }
+
+  return {
+    format: REGISTRY_FORMAT,
+    registry_version: registry.registry_version || REGISTRY_VERSION,
+    updated_at: registry.updated_at || new Date().toISOString(),
+    active_workflow_id:
+      registry.active_workflow_id && exportedWorkflows[registry.active_workflow_id]
+        ? registry.active_workflow_id
+        : order[0] || '',
+    workflow_order: order.filter(id => Boolean(exportedWorkflows[id])),
+    workflows: exportedWorkflows
+  };
+}
+
+/**
+ * Validates a full-registry JSON string or object for local storage or registry backup import.
+ * Rejects malformed or incompatible registry payloads before any state mutation.
+ */
+export function validateRegistryImport(input: unknown): RegistryValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  try {
+    let data: any = input;
+    if (typeof input === 'string') {
+      try {
+        data = JSON.parse(input);
+      } catch (e: any) {
+        return {
+          valid: false,
+          errors: [`Malformed Registry JSON: ${e?.message || 'Syntax error'}`],
+          warnings: []
+        };
+      }
+    }
+
+    if (!isPlainObject(data)) {
+      return {
+        valid: false,
+        errors: ['Invalid registry payload: root must be a JSON object'],
+        warnings: []
+      };
+    }
+
+    if (data.format !== undefined) {
+      if (typeof data.format !== 'string' || data.format !== REGISTRY_FORMAT) {
+        errors.push(
+          `Incompatible registry format: expected "${REGISTRY_FORMAT}", received "${safeString(data.format, 'invalid')}"`
+        );
+      }
+    }
+
+    if (
+      data.registry_version === undefined ||
+      typeof data.registry_version !== 'string' ||
+      data.registry_version.trim() === ''
+    ) {
+      errors.push('Missing or invalid "registry_version" string');
+    } else if (!data.registry_version.startsWith('1.')) {
+      warnings.push(
+        `Registry version "${data.registry_version}" differs from expected version "${REGISTRY_VERSION}".`
+      );
+    }
+
+    if (!isPlainObject(data.workflows)) {
+      errors.push('Missing or invalid "workflows" object map');
+    }
+
+    if (data.workflow_order !== undefined) {
+      if (
+        !Array.isArray(data.workflow_order) ||
+        !data.workflow_order.every((id: unknown) => typeof id === 'string' && id.trim() !== '')
+      ) {
+        errors.push('"workflow_order" must be an array of non-empty workflow ID strings');
+      }
+    }
+
+    if (data.active_workflow_id !== undefined && typeof data.active_workflow_id !== 'string') {
+      errors.push('"active_workflow_id" must be a string');
+    }
+
+    const validatedWorkflows: Record<string, WorkflowStore> = {};
+    if (isPlainObject(data.workflows)) {
+      const entries = Object.entries(data.workflows).filter(
+        ([key]) => !DANGEROUS_KEYS.has(key) && Object.prototype.hasOwnProperty.call(data.workflows, key)
+      );
+
+      if (entries.length === 0) {
+        errors.push('Registry must contain at least one workflow in "workflows"');
+      }
+
+      for (const [key, rawWf] of entries) {
+        if (!key || key.trim() === '') {
+          errors.push('Workflow registry contains an empty workflow key');
+          continue;
+        }
+        const wfResult = validateWorkflowDraft(rawWf);
+        if (!wfResult.valid || !wfResult.store) {
+          errors.push(`Workflow "${key}": ${wfResult.errors.join('; ')}`);
+          continue;
+        }
+        const store = wfResult.store;
+        // Preserve explicit workflow ID from metadata or key
+        const rawMeta = isPlainObject((rawWf as any)?.metadata) ? (rawWf as any).metadata : {};
+        const explicitId = safeString(rawMeta.workflow_id ?? rawMeta.id, key) || key;
+        store.metadata.id = explicitId;
+        validatedWorkflows[explicitId] = store;
+        if (wfResult.warnings.length > 0) {
+          warnings.push(...wfResult.warnings.map(w => `Workflow "${explicitId}": ${w}`));
+        }
+      }
+    }
+
+    if (errors.length > 0) {
+      return {
+        valid: false,
+        errors,
+        warnings
+      };
+    }
+
+    const validIds = Object.keys(validatedWorkflows);
+    const rawOrder: string[] = Array.isArray(data.workflow_order) ? data.workflow_order : [];
+    const normalizedOrder: string[] = [];
+
+    for (const id of rawOrder) {
+      if (validatedWorkflows[id] && !normalizedOrder.includes(id)) {
+        normalizedOrder.push(id);
+      }
+    }
+    for (const id of validIds) {
+      if (!normalizedOrder.includes(id)) {
+        normalizedOrder.push(id);
+      }
+    }
+
+    const requestedActiveId = safeString(data.active_workflow_id, '');
+    const resolvedActiveId =
+      requestedActiveId && validatedWorkflows[requestedActiveId]
+        ? requestedActiveId
+        : normalizedOrder[0];
+
+    const registry: WorkflowRegistry = {
+      format: REGISTRY_FORMAT,
+      registry_version: safeString(data.registry_version, REGISTRY_VERSION) || REGISTRY_VERSION,
+      updated_at: safeString(data.updated_at, new Date().toISOString()) || new Date().toISOString(),
+      active_workflow_id: resolvedActiveId,
+      workflow_order: normalizedOrder,
+      workflows: validatedWorkflows
+    };
+
+    return {
+      valid: true,
+      errors: [],
+      warnings,
+      registry
+    };
+  } catch (e: any) {
+    return {
+      valid: false,
+      errors: [`Unexpected registry validation error: ${e?.message || 'Invalid registry structure'}`],
+      warnings
+    };
+  }
 }

@@ -1,7 +1,7 @@
 import type { WorkflowStore } from '../data/model';
-import { mapStoreToSchema } from './schema';
+import { mapRegistryToExportPayload, mapStoreToSchema, type WorkflowRegistry } from './schema';
 
-export { mapStoreToSchema };
+export { mapStoreToSchema, mapRegistryToExportPayload };
 
 export function validateForExport(store: WorkflowStore): string[] {
   const missing: string[] = [];
@@ -75,6 +75,23 @@ export function exportDraftToJSON(store: WorkflowStore): string {
   return dataStr;
 }
 
+/**
+ * Exports a complete multi-workflow registry backup JSON containing all workflows,
+ * drafts, workflow identities, step configurations, and extension properties.
+ */
+export function exportRegistryToJSON(registry: WorkflowRegistry): string {
+  const payload = mapRegistryToExportPayload(registry);
+  const dataStr = JSON.stringify(payload, null, 2);
+  const dataUri = 'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr);
+  const exportFileDefaultName = 'workflow-registry-backup.json';
+
+  const linkElement = document.createElement('a');
+  linkElement.setAttribute('href', dataUri);
+  linkElement.setAttribute('download', exportFileDefaultName);
+  linkElement.click();
+  return dataStr;
+}
+
 export function generateMarkdown(store: WorkflowStore): string {
   let md = `# AI Workflow Governance Specification\n\n`;
   md += `## 1. Workflow Metadata\n`;
@@ -97,6 +114,10 @@ export function generateMarkdown(store: WorkflowStore): string {
     md += `- **Inputs**: ${(step.inputs && step.inputs.length > 0) ? step.inputs.join(', ') : 'None'}\n`;
     md += `- **Outputs**: ${(step.outputs && step.outputs.length > 0) ? step.outputs.join(', ') : 'None'}\n\n`;
 
+    md += `#### AI Involvement\n`;
+    md += `- **AI Role**: ${step.ai_involvement?.ai_role || 'Not specified'}\n`;
+    md += `- **AI Reliance Level**: ${step.ai_involvement?.reliance_level || 'low'}\n\n`;
+
     md += `#### Human-AI Boundary\n`;
     md += `- **Responsible Role**: ${step.human_oversight?.responsible_role || 'Not specified'}\n`;
     md += `- **Oversight Level**: ${step.human_oversight?.oversight_level || 'none'}\n`;
@@ -105,10 +126,15 @@ export function generateMarkdown(store: WorkflowStore): string {
     md += `#### Risk & Controls\n`;
     md += `- **Bias Risk**: ${step.risks?.bias_risk || 'None identified'}\n`;
     md += `- **Operational Risk**: ${step.risks?.operational_risk || 'None identified'}\n`;
+    md += `- **Ethical Risk**: ${step.risks?.ethical_risk || 'None identified'}\n`;
+    md += `- **Privacy Risk**: ${step.risks?.privacy_risk || 'None identified'}\n`;
     md += `- **Mitigation**: ${step.risks?.mitigation || 'N/A'}\n`;
+    md += `- **Approval Required**: ${step.controls?.approval_required ? 'YES' : 'No'}\n`;
     if (step.type === 'decision-point') {
       md += `- **Decision Record Required**: ${step.controls?.approval_required ? 'YES' : 'No'}\n`;
     }
+    md += `- **Escalation Path**: ${step.controls?.escalation_path || 'Not specified'}\n`;
+    md += `- **Review Cycle**: ${step.controls?.review_cycle || 'Not specified'}\n`;
     md += `\n`;
 
     md += `---\n\n`;
