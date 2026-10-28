@@ -194,4 +194,225 @@ describe('Demo Mode Isolation & Data Protection', () => {
     expect(app.getStore().metadata.title).toBe('My Important Workflow');
     expect(app.getStore().metadata.id).toBe('user-wf-saved-1');
   });
+
+  it('1. protects existing workflow when saving a demo copy: prompts confirmation, creates backup, and supports Restore Backup', () => {
+    const originalWorkflow: WorkflowStore = {
+      metadata: {
+        id: 'orig-populated-id',
+        title: 'Populated Original Workflow',
+        version: '1.0.0',
+        created_at: '2026-01-01T00:00:00Z',
+        owner: 'Dr. Alice',
+        organisation: 'University Lab',
+        purpose: 'Clinical governance validation',
+        domain: 'research'
+      },
+      steps: [
+        {
+          id: 'orig-step-1',
+          name: 'Ethics Review',
+          type: 'human-only',
+          description: 'Review protocol',
+          inputs: ['Protocol'],
+          outputs: ['Approval'],
+          ai_involvement: { ai_role: 'None', reliance_level: 'low' },
+          human_oversight: { responsible_role: 'Chair', oversight_level: 'full', intervention_points: 'All' },
+          risks: { bias_risk: 'Low', operational_risk: 'Delay', ethical_risk: 'Low', privacy_risk: 'Low', mitigation: 'Checklist' },
+          controls: { approval_required: true, escalation_path: 'Board', review_cycle: 'Monthly' }
+        }
+      ],
+      reflection: {
+        failure_modes: 'Incomplete ethics packet',
+        essential_judgement: 'Human ethics sign-off',
+        over_reliance_risks: 'None',
+        embedded_assumptions: 'Standard clinical trial'
+      }
+    };
+    customStorage.setItem(STORAGE_KEY, JSON.stringify(originalWorkflow));
+
+    const storageManager = new StorageManager(customStorage);
+    const app = new App(storageManager);
+
+    const confirmMessages: string[] = [];
+    window.confirm = (msg?: string) => {
+      if (msg) confirmMessages.push(msg);
+      return true;
+    };
+    window.alert = () => {};
+
+    // Enter demo mode and modify the demo
+    document.getElementById('load-demo')?.click();
+    expect(app.getIsDemoMode()).toBe(true);
+    app.getStore().metadata.title = 'Modified Healthcare Demo Copy';
+
+    // Click "Save Copy as My Workflow"
+    document.getElementById('save-demo-copy')?.click();
+
+    // Verify replacement confirmation was requested
+    expect(confirmMessages.some(m => m.includes('replace your existing workflow'))).toBe(true);
+    expect(app.getIsDemoMode()).toBe(false);
+    expect(app.getStore().metadata.title).toBe('Modified Healthcare Demo Copy');
+
+    // Verify protective backup of the original workflow was created
+    expect(storageManager.hasProtectiveBackup()).toBe(true);
+    const backupParsed = JSON.parse(storageManager.getProtectiveBackup()!);
+    expect(backupParsed.metadata.id).toBe('orig-populated-id');
+    expect(backupParsed.metadata.title).toBe('Populated Original Workflow');
+
+    // Verify accessible "Restore Backup" button is rendered and restores the original workflow
+    const restoreBtn = document.getElementById('restore-backup');
+    expect(restoreBtn).not.toBeNull();
+    restoreBtn?.click();
+
+    expect(app.getStore().metadata.id).toBe('orig-populated-id');
+    expect(app.getStore().metadata.title).toBe('Populated Original Workflow');
+    expect(app.getStore().steps[0].name).toBe('Ethics Review');
+    expect(JSON.parse(customStorage.getItem(STORAGE_KEY)!).metadata.id).toBe('orig-populated-id');
+  });
+
+  it('2. aborts demo replacement and preserves both existing workflow and demo edits when backup fails', () => {
+    const originalWorkflow: WorkflowStore = {
+      metadata: {
+        id: 'orig-safe-id',
+        title: 'Protected Original Workflow',
+        version: '1.0.0',
+        created_at: '2026-01-01T00:00:00Z',
+        owner: 'Owner',
+        organisation: 'Org',
+        purpose: 'Purpose',
+        domain: 'education'
+      },
+      steps: [],
+      reflection: { failure_modes: '', essential_judgement: '', over_reliance_risks: '', embedded_assumptions: '' }
+    };
+    customStorage.setItem(STORAGE_KEY, JSON.stringify(originalWorkflow));
+
+    let failBackupWrites = false;
+    const quotaFailingStorage: Storage = {
+      ...customStorage,
+      getItem: (k: string) => localStorageMock.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        if (failBackupWrites) {
+          const err = new Error('QuotaExceededError');
+          err.name = 'QuotaExceededError';
+          throw err;
+        }
+        localStorageMock.set(k, String(v));
+      },
+      removeItem: (k: string) => { localStorageMock.delete(k); },
+      clear: () => { localStorageMock.clear(); },
+      key: (i: number) => Array.from(localStorageMock.keys())[i] ?? null,
+      get length() { return localStorageMock.size; }
+    };
+
+    const storageManager = new StorageManager(quotaFailingStorage);
+    const app = new App(storageManager);
+
+    window.confirm = () => true;
+    const alerts: string[] = [];
+    window.alert = (msg?: string) => { if (msg) alerts.push(msg); };
+
+    document.getElementById('load-demo')?.click();
+    app.getStore().metadata.title = 'Edited Demo That Cannot Backup';
+
+    // Simulate quota failure when attempting to write backup
+    failBackupWrites = true;
+    document.getElementById('save-demo-copy')?.click();
+
+    // Replacement must abort: still in demo mode, demo edits preserved in memory, original workflow intact in storage
+    expect(app.getIsDemoMode()).toBe(true);
+    expect(app.getStore().metadata.title).toBe('Edited Demo That Cannot Backup');
+    expect(alerts.some(a => a.includes('Protective backup failed'))).toBe(true);
+    expect(JSON.parse(localStorageMock.get(STORAGE_KEY)!).metadata.id).toBe('orig-safe-id');
+  });
+
+  it('3. restores incomplete working draft reliably when exiting demo mode', () => {
+    const incompleteDraft: WorkflowStore = {
+      metadata: {
+        id: 'draft-wf-1',
+        title: 'Work in Progress Title Only',
+        version: '1.0.0',
+        created_at: '2026-01-01T00:00:00Z',
+        owner: '', // Incomplete owner
+        organisation: '',
+        purpose: '', // Incomplete purpose
+        domain: 'education'
+      },
+      steps: [
+        {
+          id: 'draft-step-1',
+          name: '', // Unnamed step just added
+          type: 'ai-supported',
+          description: 'Draft step description',
+          inputs: [],
+          outputs: [],
+          ai_involvement: { ai_role: '', reliance_level: 'low' },
+          human_oversight: { responsible_role: '', oversight_level: 'none', intervention_points: '' },
+          risks: { bias_risk: '', operational_risk: '', ethical_risk: '', privacy_risk: '', mitigation: '' },
+          controls: { approval_required: false, escalation_path: '', review_cycle: '' }
+        }
+      ],
+      reflection: { failure_modes: '', essential_judgement: '', over_reliance_risks: '', embedded_assumptions: '' }
+    };
+    customStorage.setItem(STORAGE_KEY, JSON.stringify(incompleteDraft));
+
+    const storageManager = new StorageManager(customStorage);
+    const app = new App(storageManager);
+    expect(app.getStore().metadata.title).toBe('Work in Progress Title Only');
+
+    window.confirm = () => true;
+    document.getElementById('load-demo')?.click();
+    expect(app.getIsDemoMode()).toBe(true);
+
+    // Exit demo mode
+    document.getElementById('exit-demo')?.click();
+
+    expect(app.getIsDemoMode()).toBe(false);
+    expect(app.getStore().metadata.id).toBe('draft-wf-1');
+    expect(app.getStore().metadata.title).toBe('Work in Progress Title Only');
+    expect(app.getStore().steps.length).toBe(1);
+    expect(app.getStore().steps[0].description).toBe('Draft step description');
+  });
+
+  it('4. warns when entering demo mode with unsaved in-memory changes and restores them on exit', () => {
+    // Storage that fails on write so changes stay unsaved in memory
+    const readOnlyStorage: Storage = {
+      getItem: (k: string) => localStorageMock.get(k) ?? null,
+      setItem: () => { throw new Error('QuotaExceededError'); },
+      removeItem: () => {},
+      clear: () => {},
+      key: () => null,
+      length: 0
+    };
+
+    const storageManager = new StorageManager(readOnlyStorage);
+    const app = new App(storageManager);
+
+    // Switch to context view and edit title so we have unsaved in-memory work
+    app.getStore().metadata.title = 'Unsaved In-Memory Research Workflow';
+    const titleInput = document.createElement('input');
+    titleInput.id = 'title';
+    titleInput.value = 'Unsaved In-Memory Research Workflow';
+    // Trigger saveToStorage via context input
+    (app as any).saveToStorage();
+    expect(app.getHasUnsavedChanges()).toBe(true);
+
+    const confirmPrompts: string[] = [];
+    window.confirm = (msg?: string) => {
+      if (msg) confirmPrompts.push(msg);
+      return true;
+    };
+
+    document.getElementById('load-demo')?.click();
+    expect(confirmPrompts[0]).toContain('unsaved changes in memory');
+    expect(app.getIsDemoMode()).toBe(true);
+    expect(app.getStore().metadata.title).toBe(DEMO_STATE.metadata.title);
+
+    // Exit demo mode and verify the unsaved in-memory workflow is restored with unsaved status
+    document.getElementById('exit-demo')?.click();
+    expect(app.getIsDemoMode()).toBe(false);
+    expect(app.getStore().metadata.title).toBe('Unsaved In-Memory Research Workflow');
+    expect(app.getHasUnsavedChanges()).toBe(true);
+    expect(document.getElementById('save-status')?.textContent).toContain('Unsaved in Memory');
+  });
 });

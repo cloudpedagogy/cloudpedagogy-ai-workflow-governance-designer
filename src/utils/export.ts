@@ -3,22 +3,46 @@ import { mapStoreToSchema } from './schema';
 
 export { mapStoreToSchema };
 
-export function exportToJSON(store: WorkflowStore) {
-  // Validation against required schema fields
-  const required = ['title', 'owner', 'purpose'];
-  const missing = required.filter(f => !store.metadata[f as keyof typeof store.metadata]);
+export function validateForExport(store: WorkflowStore): string[] {
+  const missing: string[] = [];
+  const requiredMeta: Array<{ key: keyof typeof store.metadata; label: string }> = [
+    { key: 'title', label: 'title' },
+    { key: 'owner', label: 'owner' },
+    { key: 'purpose', label: 'purpose' }
+  ];
+
+  for (const { key, label } of requiredMeta) {
+    const val = store.metadata?.[key];
+    if (typeof val !== 'string' || val.trim() === '') {
+      missing.push(label);
+    }
+  }
+
+  if (Array.isArray(store.steps)) {
+    store.steps.forEach((step, index) => {
+      if (!step || typeof step.name !== 'string' || step.name.trim() === '') {
+        missing.push(`Step ${index + 1} name`);
+      }
+    });
+  }
+
+  return missing;
+}
+
+export function exportToJSON(store: WorkflowStore): boolean {
+  const missing = validateForExport(store);
 
   if (missing.length > 0) {
     alert(
-      `Critical Schema Failure: Missing required fields: ${missing.join(', ')}. Please complete these before exporting.`
+      `Critical Schema Failure: Missing required fields: ${missing.join(', ')}. Please complete these before exporting a formal specification, or use "Export Draft / Recovery JSON" to save your unfinished working draft.`
     );
-    return;
+    return false;
   }
 
   const schemaCompliant = mapStoreToSchema(store);
   const dataStr = JSON.stringify(schemaCompliant, null, 2);
   const dataUri = 'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr);
-  const rawTitle = store.metadata.title || 'untitled';
+  const rawTitle = store.metadata.title?.trim() || 'untitled';
   const cleanTitle = rawTitle.toLowerCase().replace(/[^a-z0-9_-]+/g, '-') || 'untitled';
   const exportFileDefaultName = `workflow-${cleanTitle}.json`;
 
@@ -26,6 +50,29 @@ export function exportToJSON(store: WorkflowStore) {
   linkElement.setAttribute('href', dataUri);
   linkElement.setAttribute('download', exportFileDefaultName);
   linkElement.click();
+  return true;
+}
+
+/**
+ * Lossless working-draft / recovery export path.
+ * Exports the current in-memory workflow structure without blocking on incomplete metadata or unnamed steps.
+ */
+export function exportDraftToJSON(store: WorkflowStore): string {
+  const draftPayload = {
+    ...mapStoreToSchema(store),
+    _draft_recovery: true
+  };
+  const dataStr = JSON.stringify(draftPayload, null, 2);
+  const dataUri = 'data:application/json;charset=utf-8,' + encodeURIComponent(dataStr);
+  const rawTitle = store.metadata?.title?.trim() || 'untitled-draft';
+  const cleanTitle = rawTitle.toLowerCase().replace(/[^a-z0-9_-]+/g, '-') || 'untitled-draft';
+  const exportFileDefaultName = `workflow-draft-${cleanTitle}.json`;
+
+  const linkElement = document.createElement('a');
+  linkElement.setAttribute('href', dataUri);
+  linkElement.setAttribute('download', exportFileDefaultName);
+  linkElement.click();
+  return dataStr;
 }
 
 export function generateMarkdown(store: WorkflowStore): string {

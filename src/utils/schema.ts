@@ -22,16 +22,52 @@ export interface ValidationResult {
   detectedFormat?: 'schema' | 'legacy_store';
 }
 
+export interface ValidationOptions {
+  allowDraft?: boolean;
+}
+
+const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function isPlainObject(val: unknown): val is Record<string, any> {
+  return typeof val === 'object' && val !== null && !Array.isArray(val);
+}
+
+function safeString(val: unknown, fallback: string = ''): string {
+  if (typeof val === 'string') return val;
+  if (typeof val === 'number' || typeof val === 'boolean') return String(val);
+  return fallback;
+}
+
+function sanitizeExtensionValue(val: unknown): any {
+  if (Array.isArray(val)) {
+    return val.map(item => sanitizeExtensionValue(item));
+  }
+  if (isPlainObject(val)) {
+    const clean: Record<string, any> = {};
+    for (const key of Object.keys(val)) {
+      if (!DANGEROUS_KEYS.has(key) && Object.prototype.hasOwnProperty.call(val, key)) {
+        clean[key] = sanitizeExtensionValue(val[key]);
+      }
+    }
+    return clean;
+  }
+  return val;
+}
+
 function extractUnknownProperties(
   source: Record<string, any> | undefined,
   knownKeys: string[]
 ): Record<string, any> {
-  if (!source || typeof source !== 'object') return {};
+  if (!isPlainObject(source)) return {};
   const knownSet = new Set(knownKeys);
   const unknown: Record<string, any> = {};
   for (const key of Object.keys(source)) {
-    if (!knownSet.has(key)) {
-      unknown[key] = source[key];
+    if (
+      !knownSet.has(key) &&
+      !DANGEROUS_KEYS.has(key) &&
+      Object.prototype.hasOwnProperty.call(source, key)
+    ) {
+      unknown[key] = sanitizeExtensionValue(source[key]);
     }
   }
   return unknown;
@@ -200,11 +236,11 @@ export function mapStoreToSchema(store: WorkflowStore): Record<string, any> {
  * Normalizes field names while preserving IDs, user inputs, and unknown meaningful fields.
  */
 export function mapSchemaToStore(raw: any): WorkflowStore {
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+  if (!isPlainObject(raw)) {
     throw new Error('Invalid workflow object: root must be a non-null object');
   }
 
-  const rawMetadata = raw.metadata || {};
+  const rawMetadata = isPlainObject(raw.metadata) ? raw.metadata : {};
   const unknownMetadata = extractUnknownProperties(rawMetadata, [
     'workflow_id',
     'id',
@@ -224,22 +260,22 @@ export function mapSchemaToStore(raw: any): WorkflowStore {
   ]);
 
   const storeMetadata: WorkflowMetadata = {
-    id: String(rawMetadata.workflow_id ?? rawMetadata.id ?? generateUUID()),
-    title: String(rawMetadata.workflow_title ?? rawMetadata.title ?? ''),
-    version: String(rawMetadata.version || SCHEMA_VERSION),
-    created_at: String(rawMetadata.created_at || new Date().toISOString()),
-    owner: String(rawMetadata.workflow_owner ?? rawMetadata.owner ?? ''),
-    organisation: String(rawMetadata.organisation || ''),
-    purpose: String(rawMetadata.purpose || ''),
-    domain: String(rawMetadata.domain || 'education'),
-    capabilityNotes: String(rawMetadata.capability_notes ?? rawMetadata.capabilityNotes ?? ''),
-    governanceNotes: String(rawMetadata.governance_notes ?? rawMetadata.governanceNotes ?? ''),
+    id: safeString(rawMetadata.workflow_id ?? rawMetadata.id, generateUUID()) || generateUUID(),
+    title: safeString(rawMetadata.workflow_title ?? rawMetadata.title, ''),
+    version: safeString(rawMetadata.version, SCHEMA_VERSION) || SCHEMA_VERSION,
+    created_at: safeString(rawMetadata.created_at, new Date().toISOString()) || new Date().toISOString(),
+    owner: safeString(rawMetadata.workflow_owner ?? rawMetadata.owner, ''),
+    organisation: safeString(rawMetadata.organisation, ''),
+    purpose: safeString(rawMetadata.purpose, ''),
+    domain: safeString(rawMetadata.domain, 'education') || 'education',
+    capabilityNotes: safeString(rawMetadata.capability_notes ?? rawMetadata.capabilityNotes, ''),
+    governanceNotes: safeString(rawMetadata.governance_notes ?? rawMetadata.governanceNotes, ''),
     ...unknownMetadata
   };
 
   const rawSteps = Array.isArray(raw.steps) ? raw.steps : [];
   const storeSteps: WorkflowStep[] = rawSteps.map((step: any) => {
-    if (!step || typeof step !== 'object') {
+    if (!isPlainObject(step)) {
       return {
         id: generateUUID(),
         name: 'Untitled Step',
@@ -274,14 +310,14 @@ export function mapSchemaToStore(raw: any): WorkflowStore {
     const validStepTypes: StepType[] = ['human-only', 'ai-supported', 'ai-generated', 'decision-point'];
     const resolvedType: StepType = validStepTypes.includes(stepTypeRaw) ? stepTypeRaw : 'human-only';
 
-    const aiInvolvementRaw = step.ai_involvement || {};
+    const aiInvolvementRaw = isPlainObject(step.ai_involvement) ? step.ai_involvement : {};
     const validReliance: RelianceLevel[] = ['low', 'medium', 'high', 'critical'];
     const resolvedReliance: RelianceLevel = validReliance.includes(aiInvolvementRaw.reliance_level)
       ? aiInvolvementRaw.reliance_level
       : 'low';
     const unknownAi = extractUnknownProperties(aiInvolvementRaw, ['ai_role', 'reliance_level']);
 
-    const oversightRaw = step.human_oversight || {};
+    const oversightRaw = isPlainObject(step.human_oversight) ? step.human_oversight : {};
     const validOversight: OversightLevel[] = ['none', 'minimal', 'active', 'full'];
     const resolvedOversight: OversightLevel = validOversight.includes(oversightRaw.oversight_level)
       ? oversightRaw.oversight_level
@@ -292,7 +328,7 @@ export function mapSchemaToStore(raw: any): WorkflowStore {
       'intervention_points'
     ]);
 
-    const risksRaw = step.risks || {};
+    const risksRaw = isPlainObject(step.risks) ? step.risks : {};
     const unknownRisks = extractUnknownProperties(risksRaw, [
       'bias_risk',
       'operational_risk',
@@ -301,7 +337,7 @@ export function mapSchemaToStore(raw: any): WorkflowStore {
       'mitigation'
     ]);
 
-    const controlsRaw = step.controls || {};
+    const controlsRaw = isPlainObject(step.controls) ? step.controls : {};
     const unknownControls = extractUnknownProperties(controlsRaw, [
       'approval_required',
       'escalation_path',
@@ -309,42 +345,46 @@ export function mapSchemaToStore(raw: any): WorkflowStore {
     ]);
 
     return {
-      id: String(step.step_id ?? step.id ?? generateUUID()),
-      name: String(step.step_name ?? step.name ?? ''),
+      id: safeString(step.step_id ?? step.id, generateUUID()) || generateUUID(),
+      name: safeString(step.step_name ?? step.name, ''),
       type: resolvedType,
-      description: String(step.description || ''),
-      inputs: Array.isArray(step.inputs) ? step.inputs.map(String) : [],
-      outputs: Array.isArray(step.outputs) ? step.outputs.map(String) : [],
+      description: safeString(step.description, ''),
+      inputs: Array.isArray(step.inputs)
+        ? step.inputs.filter((v: unknown) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean').map((v: unknown) => safeString(v))
+        : [],
+      outputs: Array.isArray(step.outputs)
+        ? step.outputs.filter((v: unknown) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean').map((v: unknown) => safeString(v))
+        : [],
       ai_involvement: {
-        ai_role: String(aiInvolvementRaw.ai_role || ''),
+        ai_role: safeString(aiInvolvementRaw.ai_role, ''),
         reliance_level: resolvedReliance,
         ...unknownAi
       },
       human_oversight: {
-        responsible_role: String(oversightRaw.responsible_role || ''),
+        responsible_role: safeString(oversightRaw.responsible_role, ''),
         oversight_level: resolvedOversight,
-        intervention_points: String(oversightRaw.intervention_points || ''),
+        intervention_points: safeString(oversightRaw.intervention_points, ''),
         ...unknownOversight
       },
       risks: {
-        bias_risk: String(risksRaw.bias_risk || ''),
-        operational_risk: String(risksRaw.operational_risk || ''),
-        ethical_risk: String(risksRaw.ethical_risk || ''),
-        privacy_risk: String(risksRaw.privacy_risk || ''),
-        mitigation: String(risksRaw.mitigation || ''),
+        bias_risk: safeString(risksRaw.bias_risk, ''),
+        operational_risk: safeString(risksRaw.operational_risk, ''),
+        ethical_risk: safeString(risksRaw.ethical_risk, ''),
+        privacy_risk: safeString(risksRaw.privacy_risk, ''),
+        mitigation: safeString(risksRaw.mitigation, ''),
         ...unknownRisks
       },
       controls: {
         approval_required: Boolean(controlsRaw.approval_required),
-        escalation_path: String(controlsRaw.escalation_path || ''),
-        review_cycle: String(controlsRaw.review_cycle || ''),
+        escalation_path: safeString(controlsRaw.escalation_path, ''),
+        review_cycle: safeString(controlsRaw.review_cycle, ''),
         ...unknownControls
       },
       ...unknownStepProps
     };
   });
 
-  const rawReflection = raw.reflection || {};
+  const rawReflection = isPlainObject(raw.reflection) ? raw.reflection : {};
   const unknownReflection = extractUnknownProperties(rawReflection, [
     'failure_modes',
     'essential_judgement',
@@ -353,10 +393,10 @@ export function mapSchemaToStore(raw: any): WorkflowStore {
   ]);
 
   const storeReflection: Reflection = {
-    failure_modes: String(rawReflection.failure_modes || ''),
-    essential_judgement: String(rawReflection.essential_judgement || ''),
-    over_reliance_risks: String(rawReflection.over_reliance_risks || ''),
-    embedded_assumptions: String(rawReflection.embedded_assumptions || ''),
+    failure_modes: safeString(rawReflection.failure_modes, ''),
+    essential_judgement: safeString(rawReflection.essential_judgement, ''),
+    over_reliance_risks: safeString(rawReflection.over_reliance_risks, ''),
+    embedded_assumptions: safeString(rawReflection.embedded_assumptions, ''),
     ...unknownReflection
   };
 
@@ -380,178 +420,313 @@ export function mapSchemaToStore(raw: any): WorkflowStore {
 /**
  * Validates a workflow JSON string or object against WORKFLOW_SCHEMA.json rules.
  * Supports both valid exported JSON and legacy internal-storage records.
- * Rejects invalid or malicious structures before state or storage can be mutated.
+ * When options.allowDraft is true, allows incomplete working-draft strings (title, owner, purpose, step_name)
+ * while still enforcing strict structural and type safety.
  */
-export function validateWorkflowImport(input: unknown): ValidationResult {
+export function validateWorkflowImport(
+  input: unknown,
+  options: ValidationOptions = {}
+): ValidationResult {
   const errors: string[] = [];
   const warnings: string[] = [];
+  const allowDraft = Boolean(options.allowDraft);
 
-  let data: any = input;
-  if (typeof input === 'string') {
-    try {
-      data = JSON.parse(input);
-    } catch (e: any) {
+  try {
+    let data: any = input;
+    if (typeof input === 'string') {
+      try {
+        data = JSON.parse(input);
+      } catch (e: any) {
+        return {
+          valid: false,
+          errors: [`Malformed JSON: ${e?.message || 'Syntax error'}`],
+          warnings: []
+        };
+      }
+    }
+
+    if (!isPlainObject(data)) {
       return {
         valid: false,
-        errors: [`Malformed JSON: ${e?.message || 'Syntax error'}`],
+        errors: ['Invalid root format: JSON payload must be an object'],
         warnings: []
       };
     }
-  }
 
-  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    // Schema-version and compatibility checks
+    if (data.$schema !== undefined) {
+      if (typeof data.$schema !== 'string') {
+        errors.push('$schema field must be a valid URI string');
+      } else if (
+        !data.$schema.includes('json-schema.org') &&
+        !data.$schema.includes('cloudpedagogy')
+      ) {
+        warnings.push(`Non-standard $schema URI: ${data.$schema}. Compatibility cannot be guaranteed.`);
+      }
+    }
+
+    // Metadata validation
+    if (!isPlainObject(data.metadata)) {
+      errors.push('Missing required "metadata" object');
+    } else {
+      const meta = data.metadata;
+      const title = meta.workflow_title ?? meta.title;
+      const owner = meta.workflow_owner ?? meta.owner;
+      const purpose = meta.purpose;
+
+      if (meta.workflow_title !== undefined && typeof meta.workflow_title !== 'string') {
+        errors.push('Metadata error: "workflow_title" must be a string');
+      }
+      if (meta.title !== undefined && typeof meta.title !== 'string') {
+        errors.push('Metadata error: "title" must be a string');
+      }
+      if (meta.workflow_owner !== undefined && typeof meta.workflow_owner !== 'string') {
+        errors.push('Metadata error: "workflow_owner" must be a string');
+      }
+      if (meta.owner !== undefined && typeof meta.owner !== 'string') {
+        errors.push('Metadata error: "owner" must be a string');
+      }
+      if (meta.purpose !== undefined && typeof meta.purpose !== 'string') {
+        errors.push('Metadata error: "purpose" must be a string');
+      }
+
+      if (!allowDraft) {
+        if (!title || typeof title !== 'string' || title.trim() === '') {
+          errors.push('Metadata error: missing or empty workflow title ("workflow_title" or "title")');
+        }
+        if (!owner || typeof owner !== 'string' || owner.trim() === '') {
+          errors.push('Metadata error: missing or empty workflow owner ("workflow_owner" or "owner")');
+        }
+        if (!purpose || typeof purpose !== 'string' || purpose.trim() === '') {
+          errors.push('Metadata error: missing or empty purpose');
+        }
+      }
+
+      const optionalMetaStringFields = [
+        'workflow_id',
+        'id',
+        'version',
+        'created_at',
+        'organisation',
+        'domain',
+        'capability_notes',
+        'capabilityNotes',
+        'governance_notes',
+        'governanceNotes'
+      ];
+      for (const field of optionalMetaStringFields) {
+        if (meta[field] !== undefined && typeof meta[field] !== 'string') {
+          errors.push(`Metadata error: "${field}" must be a string`);
+        }
+      }
+    }
+
+    // Steps validation
+    if (data.steps === undefined) {
+      errors.push('Missing required "steps" array');
+    } else if (!Array.isArray(data.steps)) {
+      errors.push('"steps" must be an array');
+    } else {
+      data.steps.forEach((step: any, index: number) => {
+        const stepLabel = `Step ${index + 1}`;
+        if (!isPlainObject(step)) {
+          errors.push(`${stepLabel}: step entry must be an object`);
+          return;
+        }
+
+        if (step.step_id !== undefined && typeof step.step_id !== 'string') {
+          errors.push(`${stepLabel}: "step_id" must be a string`);
+        }
+        if (step.id !== undefined && typeof step.id !== 'string') {
+          errors.push(`${stepLabel}: "id" must be a string`);
+        }
+        if (step.step_name !== undefined && typeof step.step_name !== 'string') {
+          errors.push(`${stepLabel}: "step_name" must be a string`);
+        }
+        if (step.name !== undefined && typeof step.name !== 'string') {
+          errors.push(`${stepLabel}: "name" must be a string`);
+        }
+
+        const name = step.step_name ?? step.name;
+        if (!allowDraft && (!name || typeof name !== 'string' || name.trim() === '')) {
+          errors.push(`${stepLabel}: missing or empty step name ("step_name" or "name")`);
+        }
+
+        const type = step.step_type ?? step.type;
+        const validTypes = ['human-only', 'ai-supported', 'ai-generated', 'decision-point'];
+        if (!type || typeof type !== 'string' || !validTypes.includes(type)) {
+          errors.push(
+            `${stepLabel}: invalid step type "${safeString(type, 'invalid')}". Must be one of: ${validTypes.join(', ')}`
+          );
+        }
+
+        if (step.description !== undefined && typeof step.description !== 'string') {
+          errors.push(`${stepLabel}: "description" must be a string`);
+        }
+
+        if (step.inputs !== undefined) {
+          if (!Array.isArray(step.inputs) || !step.inputs.every((item: unknown) => typeof item === 'string')) {
+            errors.push(`${stepLabel}: "inputs" must be an array of strings`);
+          }
+        }
+        if (step.outputs !== undefined) {
+          if (!Array.isArray(step.outputs) || !step.outputs.every((item: unknown) => typeof item === 'string')) {
+            errors.push(`${stepLabel}: "outputs" must be an array of strings`);
+          }
+        }
+
+        if (step.ai_involvement !== undefined) {
+          if (!isPlainObject(step.ai_involvement)) {
+            errors.push(`${stepLabel}: "ai_involvement" must be an object`);
+          } else {
+            if (
+              step.ai_involvement.ai_role !== undefined &&
+              typeof step.ai_involvement.ai_role !== 'string'
+            ) {
+              errors.push(`${stepLabel}: "ai_involvement.ai_role" must be a string`);
+            }
+            const reliance = step.ai_involvement.reliance_level;
+            const validReliance = ['low', 'medium', 'high', 'critical'];
+            if (
+              reliance !== undefined &&
+              (typeof reliance !== 'string' || !validReliance.includes(reliance))
+            ) {
+              errors.push(
+                `${stepLabel}: invalid reliance_level "${safeString(reliance, 'invalid')}". Must be one of: ${validReliance.join(', ')}`
+              );
+            }
+          }
+        }
+
+        if (step.human_oversight !== undefined) {
+          if (!isPlainObject(step.human_oversight)) {
+            errors.push(`${stepLabel}: "human_oversight" must be an object`);
+          } else {
+            if (
+              step.human_oversight.responsible_role !== undefined &&
+              typeof step.human_oversight.responsible_role !== 'string'
+            ) {
+              errors.push(`${stepLabel}: "human_oversight.responsible_role" must be a string`);
+            }
+            if (
+              step.human_oversight.intervention_points !== undefined &&
+              typeof step.human_oversight.intervention_points !== 'string'
+            ) {
+              errors.push(`${stepLabel}: "human_oversight.intervention_points" must be a string`);
+            }
+            const oversight = step.human_oversight.oversight_level;
+            const validOversight = ['none', 'minimal', 'active', 'full'];
+            if (
+              oversight !== undefined &&
+              (typeof oversight !== 'string' || !validOversight.includes(oversight))
+            ) {
+              errors.push(
+                `${stepLabel}: invalid oversight_level "${safeString(oversight, 'invalid')}". Must be one of: ${validOversight.join(', ')}`
+              );
+            }
+          }
+        }
+
+        if (step.controls !== undefined) {
+          if (!isPlainObject(step.controls)) {
+            errors.push(`${stepLabel}: "controls" must be an object`);
+          } else {
+            if (
+              step.controls.approval_required !== undefined &&
+              typeof step.controls.approval_required !== 'boolean'
+            ) {
+              errors.push(`${stepLabel}: "controls.approval_required" must be a boolean`);
+            }
+            if (
+              step.controls.escalation_path !== undefined &&
+              typeof step.controls.escalation_path !== 'string'
+            ) {
+              errors.push(`${stepLabel}: "controls.escalation_path" must be a string`);
+            }
+            if (
+              step.controls.review_cycle !== undefined &&
+              typeof step.controls.review_cycle !== 'string'
+            ) {
+              errors.push(`${stepLabel}: "controls.review_cycle" must be a string`);
+            }
+          }
+        }
+
+        if (step.risks !== undefined) {
+          if (!isPlainObject(step.risks)) {
+            errors.push(`${stepLabel}: "risks" must be an object`);
+          } else {
+            const riskFields = [
+              'bias_risk',
+              'operational_risk',
+              'ethical_risk',
+              'privacy_risk',
+              'mitigation'
+            ];
+            for (const rf of riskFields) {
+              if (step.risks[rf] !== undefined && typeof step.risks[rf] !== 'string') {
+                errors.push(`${stepLabel}: "risks.${rf}" must be a string`);
+              }
+            }
+          }
+        }
+      });
+    }
+
+    // Reflection validation if present
+    if (data.reflection !== undefined) {
+      if (!isPlainObject(data.reflection)) {
+        errors.push('"reflection" must be an object if provided');
+      } else {
+        const reflectionFields = [
+          'failure_modes',
+          'essential_judgement',
+          'over_reliance_risks',
+          'embedded_assumptions'
+        ];
+        for (const rf of reflectionFields) {
+          if (data.reflection[rf] !== undefined && typeof data.reflection[rf] !== 'string') {
+            errors.push(`Reflection error: "${rf}" must be a string`);
+          }
+        }
+      }
+    }
+
+    if (errors.length > 0) {
+      return {
+        valid: false,
+        errors,
+        warnings
+      };
+    }
+
+    const isSchemaFormat = Boolean(
+      'workflow_title' in (data.metadata || {}) ||
+        'workflow_id' in (data.metadata || {}) ||
+        (data.steps?.[0] && isPlainObject(data.steps[0]) && 'step_name' in data.steps[0])
+    );
+    const store = mapSchemaToStore(data);
+
     return {
-      valid: false,
-      errors: ['Invalid root format: JSON payload must be an object'],
-      warnings: []
+      valid: true,
+      errors: [],
+      warnings,
+      store,
+      detectedFormat: isSchemaFormat ? 'schema' : 'legacy_store'
     };
-  }
-
-  // Schema-version and compatibility checks
-  if (data.$schema !== undefined) {
-    if (typeof data.$schema !== 'string') {
-      errors.push('$schema field must be a valid URI string');
-    } else if (
-      !data.$schema.includes('json-schema.org') &&
-      !data.$schema.includes('cloudpedagogy')
-    ) {
-      warnings.push(`Non-standard $schema URI: ${data.$schema}. Compatibility cannot be guaranteed.`);
-    }
-  }
-
-  // Metadata validation
-  if (!data.metadata || typeof data.metadata !== 'object' || Array.isArray(data.metadata)) {
-    errors.push('Missing required "metadata" object');
-  } else {
-    const meta = data.metadata;
-    const title = meta.workflow_title ?? meta.title;
-    const owner = meta.workflow_owner ?? meta.owner;
-    const purpose = meta.purpose;
-
-    if (!title || typeof title !== 'string' || title.trim() === '') {
-      errors.push('Metadata error: missing or empty workflow title ("workflow_title" or "title")');
-    }
-    if (!owner || typeof owner !== 'string' || owner.trim() === '') {
-      errors.push('Metadata error: missing or empty workflow owner ("workflow_owner" or "owner")');
-    }
-    if (!purpose || typeof purpose !== 'string' || purpose.trim() === '') {
-      errors.push('Metadata error: missing or empty purpose');
-    }
-
-    if (meta.version !== undefined && typeof meta.version !== 'string') {
-      errors.push('Metadata error: "version" must be a string');
-    }
-    if (meta.created_at !== undefined && typeof meta.created_at !== 'string') {
-      errors.push('Metadata error: "created_at" must be a string');
-    }
-  }
-
-  // Steps validation
-  if (data.steps === undefined) {
-    errors.push('Missing required "steps" array');
-  } else if (!Array.isArray(data.steps)) {
-    errors.push('"steps" must be an array');
-  } else {
-    data.steps.forEach((step: any, index: number) => {
-      const stepLabel = `Step ${index + 1}`;
-      if (!step || typeof step !== 'object' || Array.isArray(step)) {
-        errors.push(`${stepLabel}: step entry must be an object`);
-        return;
-      }
-
-      const name = step.step_name ?? step.name;
-      if (!name || typeof name !== 'string' || name.trim() === '') {
-        errors.push(`${stepLabel}: missing or empty step name ("step_name" or "name")`);
-      }
-
-      const type = step.step_type ?? step.type;
-      const validTypes = ['human-only', 'ai-supported', 'ai-generated', 'decision-point'];
-      if (!type || typeof type !== 'string' || !validTypes.includes(type)) {
-        errors.push(
-          `${stepLabel}: invalid step type "${type}". Must be one of: ${validTypes.join(', ')}`
-        );
-      }
-
-      if (step.inputs !== undefined && !Array.isArray(step.inputs)) {
-        errors.push(`${stepLabel}: "inputs" must be an array of strings`);
-      }
-      if (step.outputs !== undefined && !Array.isArray(step.outputs)) {
-        errors.push(`${stepLabel}: "outputs" must be an array of strings`);
-      }
-
-      if (step.ai_involvement !== undefined) {
-        if (typeof step.ai_involvement !== 'object' || Array.isArray(step.ai_involvement)) {
-          errors.push(`${stepLabel}: "ai_involvement" must be an object`);
-        } else {
-          const reliance = step.ai_involvement.reliance_level;
-          const validReliance = ['low', 'medium', 'high', 'critical'];
-          if (reliance !== undefined && !validReliance.includes(reliance)) {
-            errors.push(
-              `${stepLabel}: invalid reliance_level "${reliance}". Must be one of: ${validReliance.join(', ')}`
-            );
-          }
-        }
-      }
-
-      if (step.human_oversight !== undefined) {
-        if (typeof step.human_oversight !== 'object' || Array.isArray(step.human_oversight)) {
-          errors.push(`${stepLabel}: "human_oversight" must be an object`);
-        } else {
-          const oversight = step.human_oversight.oversight_level;
-          const validOversight = ['none', 'minimal', 'active', 'full'];
-          if (oversight !== undefined && !validOversight.includes(oversight)) {
-            errors.push(
-              `${stepLabel}: invalid oversight_level "${oversight}". Must be one of: ${validOversight.join(', ')}`
-            );
-          }
-        }
-      }
-
-      if (step.controls !== undefined) {
-        if (typeof step.controls !== 'object' || Array.isArray(step.controls)) {
-          errors.push(`${stepLabel}: "controls" must be an object`);
-        } else if (
-          step.controls.approval_required !== undefined &&
-          typeof step.controls.approval_required !== 'boolean'
-        ) {
-          errors.push(`${stepLabel}: "controls.approval_required" must be a boolean`);
-        }
-      }
-
-      if (step.risks !== undefined) {
-        if (typeof step.risks !== 'object' || Array.isArray(step.risks)) {
-          errors.push(`${stepLabel}: "risks" must be an object`);
-        }
-      }
-    });
-  }
-
-  // Reflection validation if present
-  if (
-    data.reflection !== undefined &&
-    (typeof data.reflection !== 'object' || Array.isArray(data.reflection))
-  ) {
-    errors.push('"reflection" must be an object if provided');
-  }
-
-  if (errors.length > 0) {
+  } catch (e: any) {
     return {
       valid: false,
-      errors,
+      errors: [`Unexpected validation error: ${e?.message || 'Invalid workflow structure'}`],
       warnings
     };
   }
+}
 
-  const isSchemaFormat = Boolean(
-    data.metadata?.workflow_title || (data.steps?.[0] && 'step_name' in data.steps[0])
-  );
-  const store = mapSchemaToStore(data);
-
-  return {
-    valid: true,
-    errors: [],
-    warnings,
-    store,
-    detectedFormat: isSchemaFormat ? 'schema' : 'legacy_store'
-  };
+/**
+ * Validates a working draft (stored in localStorage or exported as a draft recovery file).
+ * Allows incomplete titles, owners, purposes, and step names while enforcing structural and type safety.
+ */
+export function validateWorkflowDraft(input: unknown): ValidationResult {
+  return validateWorkflowImport(input, { allowDraft: true });
 }

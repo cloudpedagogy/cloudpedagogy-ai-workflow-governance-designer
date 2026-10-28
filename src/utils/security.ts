@@ -40,6 +40,11 @@ export function sanitizeUrl(url: unknown): string {
     return '';
   }
 
+  // Reject protocol-relative external URLs (e.g. //evil.example.com)
+  if (trimmed.startsWith('//')) {
+    return '#unsafe-url-blocked';
+  }
+
   // Safe relative paths or in-page anchors
   if (
     trimmed.startsWith('#') ||

@@ -65,6 +65,16 @@ describe('Model Metrics & Governance Advisory Rules', () => {
     it('returns 100% for fully populated DEMO_STATE', () => {
       expect(calculateCompleteness(DEMO_STATE)).toBe(100);
     });
+
+    it('12. ignores unknown extension properties on reflection when calculating completeness', () => {
+      const storeWithExtensions: WorkflowStore = JSON.parse(JSON.stringify(DEMO_STATE));
+      storeWithExtensions.reflection.custom_boolean_flag = true;
+      storeWithExtensions.reflection.custom_numeric_score = 3;
+      storeWithExtensions.reflection.short_tag = 'ok';
+      storeWithExtensions.reflection.nested_notes = { reviewed: true };
+
+      expect(calculateCompleteness(storeWithExtensions)).toBe(100);
+    });
   });
 
   describe('AI Dependency Calculations', () => {

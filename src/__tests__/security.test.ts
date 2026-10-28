@@ -64,5 +64,13 @@ describe('Security Utilities', () => {
       expect(sanitizeUrl('vbscript:msgbox("test")')).toBe('#unsafe-url-blocked');
       expect(sanitizeUrl('data:text/html,<script>alert(1)</script>')).toBe('#unsafe-url-blocked');
     });
+
+    it('14. rejects protocol-relative external URLs beginning with // while preserving valid relative and https URLs', () => {
+      expect(sanitizeUrl('//evil.example.com/payload.js')).toBe('#unsafe-url-blocked');
+      expect(sanitizeUrl('   //attacker.org/phish  ')).toBe('#unsafe-url-blocked');
+      expect(sanitizeUrl('/local/path')).toBe('/local/path');
+      expect(sanitizeUrl('./relative/file.json')).toBe('./relative/file.json');
+      expect(sanitizeUrl('https://www.cloudpedagogy.com/')).toBe('https://www.cloudpedagogy.com/');
+    });
   });
 });

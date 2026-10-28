@@ -9,13 +9,14 @@ import {
   detectOversightGaps,
   detectConsecutiveAISteps,
   isHighRiskStep,
+  hasMeaningfulWorkflowData,
   type WorkflowStore,
   type WorkflowStep
 } from './data/model';
-import { exportToJSON, exportToMarkdown, exportToPDF } from './utils/export';
+import { exportToJSON, exportDraftToJSON, exportToMarkdown, exportToPDF } from './utils/export';
 import { generateUUID } from './utils/uuid';
 import { escapeHtml, escapeAttr } from './utils/security';
-import { validateWorkflowImport } from './utils/schema';
+import { validateWorkflowImport, validateWorkflowDraft } from './utils/schema';
 import { StorageManager } from './utils/storage';
 
 export class App {
@@ -24,6 +25,8 @@ export class App {
   private storageManager: StorageManager;
   private isDemoMode: boolean = false;
   private hasUnsavedChanges: boolean = false;
+  private preDemoStore: WorkflowStore | null = null;
+  private preDemoHadUnsavedChanges: boolean = false;
 
   constructor(storageManager?: StorageManager) {
     this.storageManager = storageManager || new StorageManager();
@@ -40,17 +43,28 @@ export class App {
     return this.isDemoMode;
   }
 
+  public getHasUnsavedChanges(): boolean {
+    return this.hasUnsavedChanges;
+  }
+
   private loadFromStorage() {
     const result = this.storageManager.loadWorkflow();
     this.store = result.data;
     if (result.success) {
       this.hasUnsavedChanges = false;
+      this.hideCorruptedBanner();
       this.updateSaveStatus('saved');
     } else {
       if (result.rawCorrupted) {
-        this.updateSaveStatus('error', 'Saved workflow corrupted. A new workflow has been initialized.');
+        this.hasUnsavedChanges = true;
+        this.showCorruptedBanner();
+        this.updateSaveStatus(
+          'error',
+          'Saved workflow in local storage is corrupted. Auto-save is paused until you download the raw data or confirm starting fresh.'
+        );
         console.warn('Storage load corrupted:', result.error);
       } else {
+        this.hasUnsavedChanges = true;
         this.updateSaveStatus('error', result.error);
       }
     }
@@ -73,10 +87,13 @@ export class App {
       return true;
     } else {
       this.hasUnsavedChanges = true;
+      if (result.isCorruptedLocked) {
+        this.showCorruptedBanner();
+      }
       this.updateSaveStatus('error', result.error);
       if (isExplicitUserSave) {
         alert(
-          `${result.error}\n\nRecovery Guidance: Click "Export JSON" from the top bar or Export tab to save your workflow safely.`
+          `${result.error}\n\nRecovery Guidance: Open the "Export" tab in the sidebar and click "Export Draft / Recovery JSON" (or "Export JSON") to save your workflow safely.`
         );
       }
       return false;
@@ -104,8 +121,8 @@ export class App {
         break;
       case 'unsaved':
         el.classList.add('status-unsaved');
-        el.textContent = '● Unsaved changes';
-        el.title = 'You have unsaved changes in memory.';
+        el.textContent = '● Unsaved in Memory';
+        el.title = customMsg || 'You have unsaved changes in memory that are not yet persisted.';
         break;
       case 'demo':
         el.classList.add('status-demo');
@@ -114,10 +131,141 @@ export class App {
         break;
       case 'error':
         el.classList.add('status-error');
-        el.textContent = '⚠️ Storage Error (Export JSON recommended)';
-        el.title = customMsg || 'Storage failure. Export JSON to save your workflow.';
+        el.textContent = '⚠️ Unsaved in Memory — Storage Error (Export JSON recommended)';
+        el.title = customMsg || 'Storage failure. Changes exist in memory only; use the Export tab to save your workflow.';
         break;
     }
+  }
+
+  private showCorruptedBanner() {
+    let banner = document.getElementById('corrupted-storage-banner');
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'corrupted-storage-banner';
+      banner.setAttribute('role', 'alert');
+      banner.innerHTML = `
+        <div class="demo-banner-content">
+          <strong>Corrupted Local Storage Detected:</strong> Unrecoverable data was found in browser storage. Auto-save is paused so your stored data is not silently overwritten.
+        </div>
+        <div class="demo-banner-actions">
+          <button id="download-corrupted-raw" class="btn btn-sm btn-primary-light" aria-label="Download preserved corrupted raw data">Download Raw Data</button>
+          <button id="discard-corrupted-storage" class="btn btn-sm btn-secondary-light" aria-label="Discard corrupted data and enable saving">Discard &amp; Start Fresh</button>
+        </div>
+      `;
+      document.querySelector('.content')?.prepend(banner);
+
+      document.getElementById('download-corrupted-raw')?.addEventListener('click', () => {
+        this.downloadCorruptedRawData();
+      });
+
+      document.getElementById('discard-corrupted-storage')?.addEventListener('click', () => {
+        this.discardCorruptedDataAndStartFresh();
+      });
+    }
+  }
+
+  private hideCorruptedBanner() {
+    document.getElementById('corrupted-storage-banner')?.remove();
+  }
+
+  public downloadCorruptedRawData(): string | null {
+    const raw = this.storageManager.getCorruptedRawData();
+    if (!raw) {
+      alert('No corrupted raw data is currently held in storage.');
+      return null;
+    }
+    const dataUri = 'data:text/plain;charset=utf-8,' + encodeURIComponent(raw);
+    const linkElement = document.createElement('a');
+    linkElement.setAttribute('href', dataUri);
+    linkElement.setAttribute('download', 'corrupted-workflow-raw.json');
+    linkElement.click();
+    return raw;
+  }
+
+  public discardCorruptedDataAndStartFresh(): boolean {
+    if (!this.storageManager.isCorruptedStorageLocked()) {
+      this.hideCorruptedBanner();
+      return true;
+    }
+
+    if (
+      !confirm(
+        'Discard the unrecoverable stored data in local storage and start fresh with the current workflow? This will permanently overwrite the corrupted record.'
+      )
+    ) {
+      return false;
+    }
+
+    const result = this.storageManager.discardCorruptedDataAndSave(this.store);
+    if (result.success) {
+      this.hasUnsavedChanges = false;
+      this.hideCorruptedBanner();
+      this.updateSaveStatus('saved');
+      this.render();
+      alert('Corrupted storage cleared. Your current workflow is now saved.');
+      return true;
+    } else {
+      this.hasUnsavedChanges = true;
+      this.updateSaveStatus('error', result.error);
+      alert(
+        `Failed to overwrite corrupted storage data:\n${result.error}\n\nOpen the "Export" tab and click "Export Draft / Recovery JSON" to save your work to disk.`
+      );
+      return false;
+    }
+  }
+
+  private syncRestoreBackupButton() {
+    const topActions = document.querySelector('.top-actions');
+    if (!topActions) return;
+
+    const existingBtn = document.getElementById('restore-backup');
+    if (this.storageManager.hasProtectiveBackup()) {
+      if (!existingBtn) {
+        const btn = document.createElement('button');
+        btn.id = 'restore-backup';
+        btn.className = 'btn btn-secondary';
+        btn.setAttribute('aria-label', 'Restore previous workflow from protective backup');
+        btn.textContent = 'Restore Backup';
+        btn.addEventListener('click', () => {
+          this.restoreFromBackup();
+        });
+        topActions.appendChild(btn);
+      }
+    } else if (existingBtn) {
+      existingBtn.remove();
+    }
+  }
+
+  public restoreFromBackup(): boolean {
+    if (!this.storageManager.hasProtectiveBackup()) {
+      alert('No valid protective backup is available to restore.');
+      return false;
+    }
+
+    if (
+      !confirm(
+        'Restore your previous workflow from the protective backup? This will replace the current workflow in memory and local storage.'
+      )
+    ) {
+      return false;
+    }
+
+    const restored = this.storageManager.restoreProtectiveBackup();
+    if (!restored) {
+      this.updateSaveStatus('error', 'Failed to restore workflow from protective backup.');
+      alert('Failed to restore protective backup due to a storage error.');
+      return false;
+    }
+
+    this.isDemoMode = false;
+    this.preDemoStore = null;
+    this.preDemoHadUnsavedChanges = false;
+    this.hideDemoBanner();
+    this.hideCorruptedBanner();
+    this.loadFromStorage();
+    this.render();
+    alert(`Restored workflow "${this.store.metadata.title || 'Untitled Draft'}" from protective backup.`);
+    return true;
   }
 
   private showDemoBanner() {
@@ -152,35 +300,86 @@ export class App {
     document.getElementById('demo-banner')?.remove();
   }
 
-  private saveDemoAsMyWorkflow() {
+  private saveDemoAsMyWorkflow(): boolean {
+    const hasExistingWork = hasMeaningfulWorkflowData(this.preDemoStore);
+    const confirmPrompt = hasExistingWork
+      ? 'Save this demo copy as your active workflow? This will replace your existing workflow in local storage (a protective backup of your previous workflow will be created first).'
+      : 'Save this demo copy as your own workflow in local storage?';
+
+    if (!confirm(confirmPrompt)) {
+      return false;
+    }
+
+    // Create and verify protective backup of the original workflow before replacing
+    const backupResult = this.storageManager.createProtectiveBackup(this.preDemoStore || undefined);
+    if (!backupResult.success) {
+      alert(
+        `Cannot replace existing workflow: Protective backup failed (${backupResult.error}).\n\nYour existing workflow has not been modified. You can export your demo copy from the "Export" tab.`
+      );
+      return false;
+    }
+
     // Generate fresh workflow ID so it's saved as the user's own workflow
     this.store.metadata.id = generateUUID();
     this.store.metadata.created_at = new Date().toISOString();
-    this.isDemoMode = false;
-    this.hideDemoBanner();
 
     const saveResult = this.storageManager.saveWorkflow(this.store);
-    this.render();
+    this.isDemoMode = false;
+    this.preDemoStore = null;
+    this.preDemoHadUnsavedChanges = false;
+    this.hideDemoBanner();
 
     if (saveResult.success) {
       this.hasUnsavedChanges = false;
       this.updateSaveStatus('saved');
-      alert(`Workflow "${this.store.metadata.title}" saved as your own workflow.`);
+      this.render();
+      alert(
+        `Workflow "${this.store.metadata.title}" saved as your own workflow.${
+          backupResult.backedUp ? ' A protective backup of your previous workflow was saved.' : ''
+        }`
+      );
+      return true;
     } else {
+      this.hasUnsavedChanges = true;
       this.updateSaveStatus('error', saveResult.error);
-      alert(`Workflow copied to memory, but failed to write to local storage:\n${saveResult.error}\n\nPlease export as JSON.`);
+      this.render();
+      alert(
+        `Workflow copied to memory, but failed to write to local storage:\n${saveResult.error}\n\nOpen the "Export" tab and click "Export Draft / Recovery JSON" or "Export JSON" to save your work.`
+      );
+      return false;
     }
   }
 
   private exitDemoMode() {
     if (this.hasUnsavedChanges) {
-      if (!confirm('Exit demo mode? Any in-memory demo edits will be discarded, and your previously saved workflow will be restored.')) {
+      if (
+        !confirm(
+          'Exit demo mode? Any in-memory demo edits will be discarded, and your previous workflow will be restored.'
+        )
+      ) {
         return;
       }
     }
     this.isDemoMode = false;
     this.hideDemoBanner();
-    this.loadFromStorage();
+
+    if (this.preDemoStore) {
+      this.store = JSON.parse(JSON.stringify(this.preDemoStore));
+      this.hasUnsavedChanges = this.preDemoHadUnsavedChanges;
+      this.preDemoStore = null;
+      this.preDemoHadUnsavedChanges = false;
+
+      if (this.storageManager.isCorruptedStorageLocked()) {
+        this.showCorruptedBanner();
+        this.updateSaveStatus('error', 'Saved workflow in local storage is corrupted.');
+      } else if (this.hasUnsavedChanges) {
+        this.updateSaveStatus('unsaved');
+      } else {
+        this.updateSaveStatus('saved');
+      }
+    } else {
+      this.loadFromStorage();
+    }
     this.render();
   }
 
@@ -199,9 +398,7 @@ export class App {
     // Top Actions
     document.getElementById('save-workflow')?.addEventListener('click', () => {
       if (this.isDemoMode) {
-        if (confirm('You are in Demo Mode. Would you like to save this demo as your own workflow?')) {
-          this.saveDemoAsMyWorkflow();
-        }
+        this.saveDemoAsMyWorkflow();
         return;
       }
 
@@ -216,11 +413,16 @@ export class App {
     });
 
     document.getElementById('load-demo')?.addEventListener('click', () => {
-      if (
-        confirm(
-          'Load healthcare demo? This will load a pre-filled example in memory. Your saved work will NOT be overwritten unless you click "Save Copy as My Workflow".'
-        )
-      ) {
+      const hasUnsavedWork = !this.isDemoMode && this.hasUnsavedChanges && hasMeaningfulWorkflowData(this.store);
+      const promptMsg = hasUnsavedWork
+        ? 'You have unsaved changes in memory. Loading the healthcare demo will hold your current workflow in memory while you explore the demo, but unsaved changes will be lost if you refresh the page or replace your workflow with the demo. Load healthcare demo?'
+        : 'Load healthcare demo? This will load a pre-filled example in memory. Your saved work will NOT be overwritten unless you click "Save Copy as My Workflow".';
+
+      if (confirm(promptMsg)) {
+        if (!this.isDemoMode) {
+          this.preDemoStore = JSON.parse(JSON.stringify(this.store));
+          this.preDemoHadUnsavedChanges = this.hasUnsavedChanges;
+        }
         this.store = JSON.parse(JSON.stringify(DEMO_STATE));
         this.isDemoMode = true;
         this.hasUnsavedChanges = false;
@@ -231,26 +433,40 @@ export class App {
     });
 
     document.getElementById('new-workflow')?.addEventListener('click', () => {
-      // Protective backup before clearing
-      const backupResult = this.storageManager.createProtectiveBackup();
+      const backupTarget = this.isDemoMode && this.preDemoStore ? this.preDemoStore : this.store;
+      const backupResult = this.storageManager.createProtectiveBackup(backupTarget);
       if (!backupResult.success) {
         alert(
-          `Cannot create new workflow: Protective backup failed (${backupResult.error}).\n\nPlease export your current workflow as JSON first to prevent data loss.`
+          `Cannot create new workflow: Protective backup failed (${backupResult.error}).\n\nOpen the "Export" tab and click "Export Draft / Recovery JSON" first to prevent data loss.`
         );
         return;
       }
 
-      if (
-        confirm(
-          'Clear all data and start a new workflow? A protective backup of your previous workflow has been saved.'
-        )
-      ) {
-        this.store = JSON.parse(JSON.stringify(INITIAL_STATE));
-        this.store.metadata.id = generateUUID();
-        this.store.metadata.created_at = new Date().toISOString();
+      const confirmMsg = backupResult.backedUp
+        ? 'Clear all data and start a new workflow? A protective backup of your previous workflow has been saved.'
+        : 'Clear all data and start a new workflow?';
+
+      if (confirm(confirmMsg)) {
+        const newStore: WorkflowStore = JSON.parse(JSON.stringify(INITIAL_STATE));
+        newStore.metadata.id = generateUUID();
+        newStore.metadata.created_at = new Date().toISOString();
+
+        const saveResult = this.storageManager.saveWorkflow(newStore);
+        if (!saveResult.success) {
+          this.updateSaveStatus('error', saveResult.error);
+          alert(
+            `Cannot create new workflow because local storage could not be updated:\n${saveResult.error}\n\nYour previous workflow has been preserved.`
+          );
+          return;
+        }
+
+        this.store = newStore;
         this.isDemoMode = false;
+        this.preDemoStore = null;
+        this.preDemoHadUnsavedChanges = false;
+        this.hasUnsavedChanges = false;
         this.hideDemoBanner();
-        this.saveToStorage(true);
+        this.updateSaveStatus('saved');
         this.render();
       }
     });
@@ -823,8 +1039,16 @@ export class App {
           <div class="metric-header">
             <span class="metric-title">JSON Specification</span>
           </div>
-          <p>Export the full machine-readable workflow specification for integration or backup.</p>
+          <p>Export the full machine-readable workflow specification for integration or governance validation.</p>
           <button id="export-json" class="btn btn-primary" aria-label="Export workflow as JSON specification">Export JSON</button>
+        </div>
+
+        <div class="metric-card">
+          <div class="metric-header">
+            <span class="metric-title">Draft / Recovery JSON</span>
+          </div>
+          <p>Export a lossless working draft at any stage, even if required metadata or step names are still incomplete.</p>
+          <button id="export-draft-json" class="btn btn-secondary" aria-label="Export unfinished working draft or recovery JSON">Export Draft / Recovery JSON</button>
         </div>
 
         <div class="metric-card">
@@ -856,6 +1080,10 @@ export class App {
       exportToJSON(this.store);
     });
 
+    document.getElementById('export-draft-json')?.addEventListener('click', () => {
+      exportDraftToJSON(this.store);
+    });
+
     document.getElementById('export-markdown')?.addEventListener('click', () => {
       exportToMarkdown(this.store);
     });
@@ -863,6 +1091,71 @@ export class App {
     document.getElementById('export-pdf')?.addEventListener('click', () => {
       exportToPDF();
     });
+  }
+
+  public importWorkflowContent(content: string): boolean {
+    // 1. Validate file content before modifying any state
+    let validation = validateWorkflowImport(content);
+    if (!validation.valid || !validation.store) {
+      const draftValidation = validateWorkflowDraft(content);
+      if (draftValidation.valid && draftValidation.store) {
+        const importAsDraft = confirm(
+          `This JSON file is an incomplete working draft (${validation.errors.join('; ')}).\n\nDo you want to recover/import it as a working draft?`
+        );
+        if (!importAsDraft) {
+          return false;
+        }
+        validation = draftValidation;
+      } else {
+        alert(
+          `Import Rejected — Malformed or Incompatible JSON:\n\n• ${validation.errors.join('\n• ')}\n\nYour active workflow has NOT been modified.`
+        );
+        return false;
+      }
+    }
+
+    // 2. Warn about non-blocking warnings if any
+    if (validation.warnings.length > 0) {
+      const proceed = confirm(
+        `Import Warnings:\n• ${validation.warnings.join('\n• ')}\n\nDo you want to proceed with this import?`
+      );
+      if (!proceed) return false;
+    }
+
+    // 3. Create protective backup before replacing current work
+    const backupTarget = this.isDemoMode && this.preDemoStore ? this.preDemoStore : this.store;
+    const backupResult = this.storageManager.createProtectiveBackup(backupTarget);
+    if (!backupResult.success) {
+      alert(
+        `Import Aborted: Protective backup failed (${backupResult.error}).\n\nYour existing workflow could not be safely backed up. Open the "Export" tab and click "Export Draft / Recovery JSON" first.`
+      );
+      return false;
+    }
+
+    const importedStore = validation.store!;
+
+    // 4. Verify persistence before replacing in-memory workflow
+    const saveResult = this.storageManager.saveWorkflow(importedStore);
+    if (!saveResult.success) {
+      this.updateSaveStatus('error', saveResult.error);
+      alert(
+        `Import Aborted — Local storage could not be updated:\n${saveResult.error}\n\nYour previous workflow has been preserved.`
+      );
+      return false;
+    }
+
+    // 5. Safely apply imported workflow
+    this.store = importedStore;
+    this.isDemoMode = false;
+    this.preDemoStore = null;
+    this.preDemoHadUnsavedChanges = false;
+    this.hasUnsavedChanges = false;
+    this.hideDemoBanner();
+    this.updateSaveStatus('saved');
+    this.render();
+
+    alert(`Workflow "${this.store.metadata.title || 'Untitled Draft'}" successfully imported.`);
+    return true;
   }
 
   private importJSON() {
@@ -876,48 +1169,7 @@ export class App {
       const reader = new FileReader();
       reader.onload = (re) => {
         const content = re.target?.result as string;
-
-        // 1. Validate file content before modifying any state
-        const validation = validateWorkflowImport(content);
-        if (!validation.valid || !validation.store) {
-          alert(
-            `Import Rejected — Malformed or Incompatible JSON:\n\n• ${validation.errors.join('\n• ')}\n\nYour active workflow has NOT been modified.`
-          );
-          return;
-        }
-
-        // 2. Warn about non-blocking warnings if any
-        if (validation.warnings.length > 0) {
-          const proceed = confirm(
-            `Import Warnings:\n• ${validation.warnings.join('\n• ')}\n\nDo you want to proceed with this import?`
-          );
-          if (!proceed) return;
-        }
-
-        // 3. Create protective backup before replacing current work
-        const backupResult = this.storageManager.createProtectiveBackup();
-        if (!backupResult.success) {
-          alert(
-            `Import Aborted: Protective backup failed (${backupResult.error}).\n\nYour existing workflow could not be safely backed up. To protect your data, please click "Export JSON" first.`
-          );
-          return;
-        }
-
-        // 4. Safely apply imported workflow
-        this.store = validation.store;
-        this.isDemoMode = false;
-        this.hideDemoBanner();
-
-        const saveResult = this.storageManager.saveWorkflow(this.store);
-        this.render();
-
-        if (!saveResult.success) {
-          alert(
-            `Workflow imported into memory, but local storage could not be updated:\n${saveResult.error}\n\nPlease export your workflow as JSON to preserve it.`
-          );
-        } else {
-          alert(`Workflow "${this.store.metadata.title}" successfully imported.`);
-        }
+        this.importWorkflowContent(content);
       };
       reader.readAsText(file);
     };
@@ -925,6 +1177,7 @@ export class App {
   }
 
   private render() {
+    this.syncRestoreBackupButton();
     this.updateCompletenessUI();
     this.renderView();
   }

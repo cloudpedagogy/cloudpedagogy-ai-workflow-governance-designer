@@ -1,5 +1,5 @@
-import { INITIAL_STATE, type WorkflowStore } from '../data/model';
-import { validateWorkflowImport } from './schema';
+import { INITIAL_STATE, hasMeaningfulWorkflowData, type WorkflowStore } from '../data/model';
+import { validateWorkflowDraft } from './schema';
 import { generateUUID } from './uuid';
 
 export const STORAGE_KEY = 'cp_workflow_designer';
@@ -17,10 +17,12 @@ export interface StorageSaveResult {
   success: boolean;
   error?: string;
   isQuotaExceeded?: boolean;
+  isCorruptedLocked?: boolean;
 }
 
 export interface BackupResult {
   success: boolean;
+  backedUp?: boolean;
   error?: string;
 }
 
@@ -44,10 +46,13 @@ function isQuotaError(e: any): boolean {
 /**
  * StorageManager provides resilient persistence using the standard cp_workflow_designer key.
  * Handles storage unavailability, quota exhaustion, corrupt storage recovery,
- * and protective pre-destructive backups.
+ * working-draft persistence, and protective pre-destructive backups.
  */
 export class StorageManager {
   private customStorage?: Storage;
+  private isCorruptedLocked: boolean = false;
+  private corruptedRawData: string | null = null;
+  private hasInspectedStorage: boolean = false;
 
   constructor(customStorage?: Storage) {
     this.customStorage = customStorage;
@@ -81,19 +86,20 @@ export class StorageManager {
     }
   }
 
+  public isCorruptedStorageLocked(): boolean {
+    return this.isCorruptedLocked;
+  }
+
+  public getCorruptedRawData(): string | null {
+    return this.corruptedRawData;
+  }
+
   /**
-   * Loads and validates workflow from local storage.
-   * If stored data is malformed, preserves the raw string without overwriting.
+   * Loads and validates workflow (including unfinished working drafts) from local storage.
+   * If stored data is malformed or incompatible, preserves the raw string and locks auto-save
+   * so subsequent edits cannot silently overwrite it.
    */
   public loadWorkflow(): StorageLoadResult {
-    if (!this.isAvailable()) {
-      return {
-        success: false,
-        data: cloneInitialState(),
-        error: 'Browser storage is unavailable. Changes will remain in memory only.'
-      };
-    }
-
     const s = this.storage;
     if (!s) {
       return {
@@ -105,7 +111,18 @@ export class StorageManager {
 
     try {
       const raw = s.getItem(STORAGE_KEY);
+      this.hasInspectedStorage = true;
+
       if (!raw) {
+        if (!this.isAvailable()) {
+          return {
+            success: false,
+            data: cloneInitialState(),
+            error: 'Browser storage is unavailable. Changes will remain in memory only.'
+          };
+        }
+        this.isCorruptedLocked = false;
+        this.corruptedRawData = null;
         return {
           success: true,
           data: cloneInitialState(),
@@ -113,8 +130,10 @@ export class StorageManager {
         };
       }
 
-      const validation = validateWorkflowImport(raw);
+      const validation = validateWorkflowDraft(raw);
       if (!validation.valid || !validation.store) {
+        this.isCorruptedLocked = true;
+        this.corruptedRawData = raw;
         return {
           success: false,
           data: cloneInitialState(),
@@ -123,6 +142,8 @@ export class StorageManager {
         };
       }
 
+      this.isCorruptedLocked = false;
+      this.corruptedRawData = null;
       return {
         success: true,
         data: validation.store
@@ -131,24 +152,51 @@ export class StorageManager {
       return {
         success: false,
         data: cloneInitialState(),
-        error: `Unexpected error reading from storage: ${e?.message || 'Unknown error'}`
+        error: ` Browser storage is unavailable or unreadable: ${e?.message || 'Unknown error'}. Changes will remain in memory only.`.trim()
       };
     }
   }
 
   /**
-   * Saves workflow to local storage, handling quota errors gracefully.
+   * Saves workflow to local storage, handling quota errors gracefully and refusing
+   * to silently overwrite unrecovered corrupted storage data.
    */
   public saveWorkflow(store: WorkflowStore): StorageSaveResult {
-    if (!this.isAvailable()) {
+    const s = this.storage;
+    if (!s) {
       return {
         success: false,
         error: 'Browser storage is unavailable. Please export your workflow as JSON to save your work.'
       };
     }
 
-    const s = this.storage;
-    if (!s) {
+    // If loadWorkflow() was not called yet, inspect existing storage to prevent silent overwrite of corrupt data
+    if (!this.hasInspectedStorage) {
+      try {
+        const existing = s.getItem(STORAGE_KEY);
+        this.hasInspectedStorage = true;
+        if (existing) {
+          const check = validateWorkflowDraft(existing);
+          if (!check.valid || !check.store) {
+            this.isCorruptedLocked = true;
+            this.corruptedRawData = existing;
+          }
+        }
+      } catch {
+        // Handled by availability/setItem check below
+      }
+    }
+
+    if (this.isCorruptedLocked) {
+      return {
+        success: false,
+        isCorruptedLocked: true,
+        error:
+          'Auto-save is paused to protect corrupted data in local storage. Download the preserved raw data or explicitly confirm starting fresh to re-enable saving.'
+      };
+    }
+
+    if (!this.isAvailable()) {
       return {
         success: false,
         error: 'Browser storage is unavailable. Please export your workflow as JSON to save your work.'
@@ -163,7 +211,8 @@ export class StorageManager {
       if (isQuotaError(e)) {
         return {
           success: false,
-          error: 'Storage quota exceeded. Your workflow cannot be saved locally. Export as JSON immediately to preserve your changes.',
+          error:
+            'Storage quota exceeded. Your workflow cannot be saved locally. Export as JSON immediately to preserve your changes.',
           isQuotaExceeded: true
         };
       }
@@ -176,33 +225,93 @@ export class StorageManager {
   }
 
   /**
-   * Creates a protective backup before destructive actions (e.g. New Workflow, Import JSON).
-   * If the backup fails, destructive operations MUST NOT proceed.
+   * Explicitly discards unrecoverable corrupted data after user confirmation and saves the active workflow.
    */
-  public createProtectiveBackup(): BackupResult {
+  public discardCorruptedDataAndSave(store: WorkflowStore): StorageSaveResult {
+    const previousRaw = this.corruptedRawData;
+    this.isCorruptedLocked = false;
+    this.corruptedRawData = null;
+    this.hasInspectedStorage = true;
+
+    const result = this.saveWorkflow(store);
+    if (!result.success) {
+      // Restore lock if write failed so state remains accurate
+      this.isCorruptedLocked = previousRaw !== null;
+      this.corruptedRawData = previousRaw;
+    }
+    return result;
+  }
+
+  /**
+   * Creates and verifies a protective backup before destructive actions
+   * (e.g. New Workflow, Import JSON, Save Demo Copy).
+   * Protects both persisted storage data and meaningful unsaved in-memory work.
+   * If a required backup fails, destructive operations MUST NOT proceed.
+   */
+  public createProtectiveBackup(inMemoryStore?: WorkflowStore): BackupResult {
     const s = this.storage;
     if (!s) {
       return {
         success: false,
+        backedUp: false,
         error: 'Storage is unavailable. Protective backup cannot be verified.'
+      };
+    }
+
+    if (this.isCorruptedLocked) {
+      return {
+        success: false,
+        backedUp: false,
+        error:
+          'Local storage contains unrecovered corrupted data. Resolve or download the corrupted data before replacing the workflow.'
       };
     }
 
     try {
       const current = s.getItem(STORAGE_KEY);
-      if (!current) {
-        // Nothing stored yet, nothing to lose
-        return { success: true };
+      const hasInMemoryWork = hasMeaningfulWorkflowData(inMemoryStore);
+
+      let payloadToBackup: string | null = null;
+      if (hasInMemoryWork && inMemoryStore) {
+        const serializedInMemory = JSON.stringify(inMemoryStore);
+        payloadToBackup = !current || serializedInMemory !== current ? serializedInMemory : current;
+      } else if (current) {
+        payloadToBackup = current;
       }
 
-      s.setItem(BACKUP_KEY, current);
-      return { success: true };
+      if (!payloadToBackup) {
+        // Neither stored data nor meaningful in-memory work exists
+        return { success: true, backedUp: false };
+      }
+
+      s.setItem(BACKUP_KEY, payloadToBackup);
+      const verified = s.getItem(BACKUP_KEY);
+      if (verified !== payloadToBackup) {
+        return {
+          success: false,
+          backedUp: false,
+          error: 'Failed to verify protective backup in local storage.'
+        };
+      }
+
+      return { success: true, backedUp: true };
     } catch (e: any) {
       return {
         success: false,
+        backedUp: false,
         error: `Failed to create protective backup: ${e?.message || 'Storage error'}`
       };
     }
+  }
+
+  /**
+   * Checks whether a valid protective backup exists in storage.
+   */
+  public hasProtectiveBackup(): boolean {
+    const raw = this.getProtectiveBackup();
+    if (!raw) return false;
+    const validation = validateWorkflowDraft(raw);
+    return Boolean(validation.valid && validation.store);
   }
 
   /**
@@ -219,18 +328,30 @@ export class StorageManager {
   }
 
   /**
-   * Restores protective backup to active storage.
+   * Restores protective backup to active storage and verifies it.
    */
   public restoreProtectiveBackup(): boolean {
     const s = this.storage;
     if (!s) return false;
     try {
       const backup = s.getItem(BACKUP_KEY);
-      if (backup) {
-        s.setItem(STORAGE_KEY, backup);
-        return true;
+      if (!backup) return false;
+
+      const validation = validateWorkflowDraft(backup);
+      if (!validation.valid || !validation.store) {
+        return false;
       }
-      return false;
+
+      s.setItem(STORAGE_KEY, backup);
+      const verified = s.getItem(STORAGE_KEY);
+      if (verified !== backup) {
+        return false;
+      }
+
+      this.isCorruptedLocked = false;
+      this.corruptedRawData = null;
+      this.hasInspectedStorage = true;
+      return true;
     } catch {
       return false;
     }

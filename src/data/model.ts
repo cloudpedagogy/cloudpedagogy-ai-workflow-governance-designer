@@ -168,10 +168,53 @@ export function calculateCompleteness(store: WorkflowStore): number {
   const anyControlsDefined = store.steps.some(s => s.controls && (s.controls.escalation_path || s.controls.review_cycle));
   if (anyControlsDefined) score++;
 
-  const reflectionComplete = store.reflection && Object.values(store.reflection).every(v => v && v.length > 10);
+  const canonicalReflectionKeys: (keyof Reflection)[] = [
+    'failure_modes',
+    'essential_judgement',
+    'over_reliance_risks',
+    'embedded_assumptions'
+  ];
+  const reflectionComplete = Boolean(
+    store.reflection &&
+      canonicalReflectionKeys.every(
+        k => typeof store.reflection[k] === 'string' && store.reflection[k].trim().length > 10
+      )
+  );
   if (reflectionComplete) score++;
 
   return Math.round((score / total) * 100);
+}
+
+export function hasMeaningfulWorkflowData(store: WorkflowStore | null | undefined): boolean {
+  if (!store || typeof store !== 'object') return false;
+  const meta = store.metadata;
+  if (meta) {
+    if (
+      (typeof meta.title === 'string' && meta.title.trim() !== '') ||
+      (typeof meta.owner === 'string' && meta.owner.trim() !== '') ||
+      (typeof meta.purpose === 'string' && meta.purpose.trim() !== '') ||
+      (typeof meta.organisation === 'string' && meta.organisation.trim() !== '') ||
+      (typeof meta.capabilityNotes === 'string' && meta.capabilityNotes.trim() !== '') ||
+      (typeof meta.governanceNotes === 'string' && meta.governanceNotes.trim() !== '')
+    ) {
+      return true;
+    }
+  }
+  if (Array.isArray(store.steps) && store.steps.length > 0) {
+    return true;
+  }
+  const ref = store.reflection;
+  if (ref) {
+    if (
+      (typeof ref.failure_modes === 'string' && ref.failure_modes.trim() !== '') ||
+      (typeof ref.essential_judgement === 'string' && ref.essential_judgement.trim() !== '') ||
+      (typeof ref.over_reliance_risks === 'string' && ref.over_reliance_risks.trim() !== '') ||
+      (typeof ref.embedded_assumptions === 'string' && ref.embedded_assumptions.trim() !== '')
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function calculateAIDependency(store: WorkflowStore): number {
